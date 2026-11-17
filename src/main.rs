@@ -42,9 +42,10 @@ enum Command {
         /// Passed to cargo as `--jobs`.
         #[arg(short, long)]
         jobs: Option<u32>,
-        /// Prefix of every URL in the output index.html.
-        #[arg(long, default_value = "/")]
-        public_url: String,
+        /// Prefix of every URL in the output index.html; overrides `<base data-trug-public-url>`
+        /// (default `/`).
+        #[arg(long)]
+        public_url: Option<String>,
         /// Print each step's time.
         #[arg(short, long)]
         verbose: bool,
@@ -59,8 +60,8 @@ enum Command {
         release: bool,
         #[arg(short, long)]
         jobs: Option<u32>,
-        #[arg(long, default_value = "/")]
-        public_url: String,
+        #[arg(long)]
+        public_url: Option<String>,
         #[arg(short, long)]
         verbose: bool,
         /// Address to listen on; repeatable. Overrides `[serve] addresses`.
@@ -161,7 +162,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cargo,
         } => {
             let (config, root) = load_config(config)?;
-            let public_url = normalize_url(public_url);
             let report = trug::build::build(&trug::build::BuildRequest {
                 config,
                 root,
@@ -192,7 +192,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 query: cargo.into(),
                 release,
                 jobs,
-                public_url: normalize_url(public_url),
+                public_url,
                 verbose,
             })?;
             eprintln!("trug: built {}", report.dist.display());
@@ -244,11 +244,4 @@ fn load_config(
     } else {
         Ok((trug::config::Config::default(), std::env::current_dir()?))
     }
-}
-
-fn normalize_url(mut public_url: String) -> String {
-    if !public_url.ends_with('/') {
-        public_url.push('/');
-    }
-    public_url
 }

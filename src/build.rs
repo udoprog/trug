@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -59,8 +60,8 @@ pub struct BuildRequest {
     pub query: Query,
     pub release: bool,
     pub jobs: Option<u32>,
-    /// Prefix of every URL in the output html.
-    pub public_url: String,
+    /// Prefix of every URL in the output html; overrides the document's base tag.
+    pub public_url: Option<String>,
     pub verbose: bool,
 }
 
@@ -105,6 +106,14 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     let html =
         std::fs::read_to_string(&paths.target).map_err(|e| Error::Io(paths.target.clone(), e))?;
     let directives = html::directives(&html);
+    let base = html::public_url_base(&html);
+    let public_url = normalize_url(
+        request
+            .public_url
+            .as_deref()
+            .or_else(|| base.as_ref().and_then(|b| b.attr("href")))
+            .unwrap_or("/"),
+    );
     let plan = Plan::new(&directives, &paths)?;
 
     let staging = Staging::create(&paths.dist).map_err(|e| Error::Io(paths.dist.clone(), e))?;
@@ -121,7 +130,7 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     query.target = Some(WASM_TARGET.to_owned());
 
     let links = timer.step("styles", || {
-        stage_styles(&plan.styles, &query, staging.path(), &request.public_url)
+        stage_styles(&plan.styles, &query, staging.path(), &public_url)
     })?;
 
     let wasm = timer.step("cargo", || cargo_build(&query, request))?;
@@ -130,13 +139,26 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
 
     timer.step("output", || {
         let assets = bindgen.stage(staging.path())?;
+        let mut links = links;
+        links.extend(plan.stage_statics(staging.path(), &public_url, &directives)?);
+        let mut extra = Vec::new();
+        if let Some(base) = &base {
+            let tag = html::tag(
+                "base",
+                &base.attrs,
+                &["data-trug-public-url"],
+                ("href", &public_url),
+            );
+            extra.push((base.range.clone(), tag));
+        }
         let out = render(
             &html,
             &directives,
             &plan,
             &assets,
             &links,
-            &request.public_url,
+            &public_url,
+            extra,
         );
         let index = staging.path().join("index.html");
         std::fs::write(&index, out).map_err(|e| Error::Io(index, e))
@@ -148,12 +170,27 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     Ok(report)
 }
 
+pub fn normalize_url(url: &str) -> String {
+    let mut url = url.to_owned();
+    if !url.ends_with('/') {
+        url.push('/');
+    }
+    url
+}
+
+enum Static {
+    CopyDir { from: PathBuf, to: PathBuf },
+    Icon { from: PathBuf },
+}
+
 /// What the document's directives ask for.
 struct Plan {
     manifest: PathBuf,
     /// The rust link's index in the directives, if the document has one.
     rust: Option<usize>,
     styles: Vec<Style>,
+    /// Directive index and what to do for each copy-dir and icon link.
+    statics: Vec<(usize, Static)>,
 }
 
 /// A `rel="scss"` or `rel="css"` link: the directive's index and the source file.
@@ -164,10 +201,80 @@ struct Style {
 }
 
 impl Plan {
+    /// Copies the static files into staging; returns the replacement for each icon link.
+    fn stage_statics(
+        &self,
+        staging: &Path,
+        public_url: &str,
+        directives: &[Directive],
+    ) -> Result<HashMap<usize, String>, Error> {
+        let mut links = HashMap::new();
+        for (at, item) in &self.statics {
+            match item {
+                Static::CopyDir { from, to } => copy_dir(from, &staging.join(to))?,
+                Static::Icon { from } => {
+                    let bytes = std::fs::read(from).map_err(|e| Error::Io(from.clone(), e))?;
+                    let stem = from
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let ext = from
+                        .extension()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let name = hashed_name(&stem, &ext, &bytes);
+                    let to = staging.join(&name);
+                    std::fs::write(&to, bytes).map_err(|e| Error::Io(to, e))?;
+                    let directive = &directives[*at];
+                    let tag = html::tag(
+                        "link",
+                        &directive.attrs,
+                        &["data-trug"],
+                        ("href", &format!("{public_url}{name}")),
+                    );
+                    links.insert(*at, tag);
+                }
+            }
+        }
+        Ok(links)
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<(), Error> {
+    std::fs::create_dir_all(to).map_err(|e| Error::Io(to.to_owned(), e))?;
+    let entries = std::fs::read_dir(from).map_err(|e| Error::Io(from.to_owned(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Io(from.to_owned(), e))?;
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target).map_err(|e| Error::Io(entry.path(), e))?;
+        }
+    }
+    Ok(())
+}
+
+fn relative_target(path: &str) -> Result<PathBuf, Error> {
+    let path = Path::new(path);
+    let ok = path
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !ok || path.as_os_str().is_empty() {
+        return Err(Error::Html(format!(
+            "data-target-path {:?} must be a relative path inside dist",
+            path.display()
+        )));
+    }
+    Ok(path.to_owned())
+}
+
+impl Plan {
     fn new(directives: &[Directive], paths: &Paths) -> Result<Self, Error> {
         let dir = paths.target.parent().unwrap_or(&paths.root);
         let mut rust = None;
         let mut styles = Vec::new();
+        let mut statics = Vec::new();
         for (at, directive) in directives.iter().enumerate() {
             match directive.attr("rel") {
                 Some("rust") => {
@@ -184,6 +291,37 @@ impl Plan {
                         scss: rel == "scss",
                         path: dir.join(href),
                     });
+                }
+                Some("copy-dir") => {
+                    let href = directive
+                        .attr("href")
+                        .ok_or_else(|| Error::Html("rel=\"copy-dir\" link without href".into()))?;
+                    let to = match directive.attr("data-target-path") {
+                        Some(path) => relative_target(path)?,
+                        None => {
+                            PathBuf::from(Path::new(href).file_name().ok_or_else(|| {
+                                Error::Html(format!("bad copy-dir href {href:?}"))
+                            })?)
+                        }
+                    };
+                    statics.push((
+                        at,
+                        Static::CopyDir {
+                            from: dir.join(href),
+                            to,
+                        },
+                    ));
+                }
+                Some("icon") => {
+                    let href = directive
+                        .attr("href")
+                        .ok_or_else(|| Error::Html("rel=\"icon\" link without href".into()))?;
+                    statics.push((
+                        at,
+                        Static::Icon {
+                            from: dir.join(href),
+                        },
+                    ));
                 }
                 other => {
                     return Err(Error::Html(format!(
@@ -204,6 +342,7 @@ impl Plan {
             manifest,
             rust,
             styles,
+            statics,
         })
     }
 }
@@ -509,6 +648,7 @@ fn render(
     assets: &Assets,
     links: &HashMap<usize, String>,
     public_url: &str,
+    extra: Vec<(Range<usize>, String)>,
 ) -> String {
     let loader = loader(assets, public_url);
     let mut edits: Vec<_> = directives
@@ -523,6 +663,7 @@ fn render(
             (d.range.clone(), text)
         })
         .collect();
+    edits.extend(extra);
     if plan.rust.is_none() {
         let at = html::head_end(html);
         edits.push((at..at, loader));
@@ -561,7 +702,15 @@ mod tests {
         let html = "<html><head>\r\n<title>x</title>\r\n<link data-trug rel=\"rust\" href=\"app/Cargo.toml\">\r\n</head><body></body></html>";
         let (directives, plan) = plan_for(html);
         assert_eq!(plan.manifest, Path::new("/app/app/Cargo.toml"));
-        let out = render(html, &directives, &plan, &assets(), &HashMap::new(), "/");
+        let out = render(
+            html,
+            &directives,
+            &plan,
+            &assets(),
+            &HashMap::new(),
+            "/",
+            vec![],
+        );
         assert!(out.starts_with("<html><head>\r\n<title>x</title>\r\n<link rel=\"modulepreload\" href=\"/app-1.js\" crossorigin>"));
         assert!(out.contains(
             "import init from '/app-1.js'; await init({ module_or_path: '/app_bg-2.wasm' });"
@@ -584,11 +733,63 @@ mod tests {
             &assets(),
             &HashMap::new(),
             "/base/",
+            vec![],
         );
         assert!(out.starts_with(
             "<head><meta charset=\"utf-8\"><link rel=\"modulepreload\" href=\"/base/app-1.js\""
         ));
         assert!(out.ends_with("</script></head><body></body>"));
+    }
+
+    #[test]
+    fn icon_and_copy_dir_are_staged() {
+        let tmp = std::env::temp_dir().join(format!("trug-static-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("icons/sub")).unwrap();
+        std::fs::create_dir_all(tmp.join("out")).unwrap();
+        std::fs::write(tmp.join("icons/a.txt"), "a").unwrap();
+        std::fs::write(tmp.join("icons/sub/b.txt"), "b").unwrap();
+        std::fs::write(tmp.join("fav.png"), "png").unwrap();
+        let html = "<head><base data-trug-public-url><link data-trug rel=\"icon\" type=\"image/png\" href=\"fav.png\"><link data-trug rel=\"copy-dir\" href=\"icons\" data-target-path=\"static/icons\"><link data-trug rel=\"copy-dir\" href=\"icons\"></head>";
+        let directives = html::directives(html);
+        let paths = Config::default().paths(&tmp);
+        let plan = Plan::new(&directives, &paths).unwrap();
+        let links = plan
+            .stage_statics(&tmp.join("out"), "/app/", &directives)
+            .unwrap();
+        let mut extra = Vec::new();
+        let base = html::public_url_base(html).unwrap();
+        extra.push((
+            base.range.clone(),
+            html::tag(
+                "base",
+                &base.attrs,
+                &["data-trug-public-url"],
+                ("href", "/app/"),
+            ),
+        ));
+        let out = render(html, &directives, &plan, &assets(), &links, "/app/", extra);
+        let name = hashed_name("fav", "png", b"png");
+        assert!(out.starts_with("<head><base href=\"/app/\">"));
+        assert!(out.contains(&format!(
+            "<link rel=\"icon\" type=\"image/png\" href=\"/app/{name}\">"
+        )));
+        assert!(!out.contains("data-trug") && !out.contains("icons"));
+        assert!(tmp.join("out").join(&name).exists());
+        assert_eq!(
+            std::fs::read(tmp.join("out/static/icons/sub/b.txt")).unwrap(),
+            b"b"
+        );
+        assert!(tmp.join("out/icons/a.txt").exists());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_target_paths() {
+        assert!(relative_target("../x").is_err());
+        assert!(relative_target("/x").is_err());
+        assert!(relative_target("a/b").is_ok());
+        assert_eq!(normalize_url("/a"), "/a/");
     }
 
     #[test]
@@ -625,7 +826,7 @@ mod tests {
             ..Query::default()
         };
         let links = stage_styles(&plan.styles, &query, &staging, "/pub/").unwrap();
-        let out = render(html, &directives, &plan, &assets(), &links, "/pub/");
+        let out = render(html, &directives, &plan, &assets(), &links, "/pub/", vec![]);
         let mut files: Vec<_> = std::fs::read_dir(&staging)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

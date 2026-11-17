@@ -60,6 +60,68 @@ pub fn directives(html: &str) -> Vec<Directive> {
     found
 }
 
+/// The `<base data-trug-public-url>` tag, if the document has one.
+pub fn public_url_base(html: &str) -> Option<Directive> {
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while let Some(offset) = html[i..].find('<') {
+        let start = i + offset;
+        let rest = &html[start..];
+        if rest.starts_with("<!--") {
+            i = rest.find("-->").map_or(html.len(), |end| start + end + 3);
+            continue;
+        }
+        let name_len = rest[1..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric())
+            .count();
+        let name = rest[1..1 + name_len].to_ascii_lowercase();
+        if name == "script" || name == "style" {
+            let close = format!("</{name}");
+            i = find_ci(html, start, &close).map_or(html.len(), |at| at + close.len());
+            continue;
+        }
+        let end = tag_end(bytes, start)?;
+        if name == "base" {
+            let attrs = attributes(&html[start + 5..end]);
+            if attrs.iter().any(|(key, _)| key == "data-trug-public-url") {
+                return Some(Directive {
+                    range: start..end + 1,
+                    attrs,
+                });
+            }
+        }
+        i = end + 1;
+    }
+    None
+}
+
+/// `<name attrs...>` with the named attributes dropped and `set` added or replacing its value.
+pub fn tag(name: &str, attrs: &[(String, String)], drop: &[&str], set: (&str, &str)) -> String {
+    let mut out = format!("<{name}");
+    let mut done = false;
+    for (key, value) in attrs {
+        if drop.contains(&key.as_str()) {
+            continue;
+        }
+        if key == set.0 {
+            done = true;
+            push_attr(&mut out, key, set.1);
+        } else {
+            push_attr(&mut out, key, value);
+        }
+    }
+    if !done {
+        push_attr(&mut out, set.0, set.1);
+    }
+    out.push('>');
+    out
+}
+
+fn push_attr(out: &mut String, key: &str, value: &str) {
+    out.push_str(&format!(" {key}=\"{}\"", value.replace('"', "&quot;")));
+}
+
 fn find_ci(html: &str, from: usize, needle: &str) -> Option<usize> {
     let hay = html.as_bytes();
     (from..hay.len().saturating_sub(needle.len() - 1))
@@ -168,6 +230,23 @@ mod tests {
             &html[found[0].range.clone()],
             r#"<link data-trug rel="rust" href="Cargo.toml"/>"#
         );
+    }
+
+    #[test]
+    fn finds_base_and_rebuilds_tags() {
+        let html = r#"<!-- <base data-trug-public-url> --><base data-trug-public-url href="/x/" target=_top>"#;
+        let base = public_url_base(html).unwrap();
+        assert_eq!(base.attr("href"), Some("/x/"));
+        assert_eq!(
+            tag(
+                "base",
+                &base.attrs,
+                &["data-trug-public-url"],
+                ("href", "/y/")
+            ),
+            r#"<base href="/y/" target="_top">"#
+        );
+        assert!(public_url_base("<base href=/>").is_none());
     }
 
     #[test]
