@@ -31,6 +31,26 @@ enum Command {
         #[command(flatten)]
         cargo: CargoArgs,
     },
+    /// Build the app into dist: hooks, cargo, wasm-bindgen, index.html; dist is replaced only on success.
+    Build {
+        /// The Trug.toml to build with; `Trug.toml` in the current directory by default, and
+        /// without one the defaults (`index.html`, `dist` beside it).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        release: bool,
+        /// Passed to cargo as `--jobs`.
+        #[arg(short, long)]
+        jobs: Option<u32>,
+        /// Prefix of every URL in the output index.html.
+        #[arg(long, default_value = "/")]
+        public_url: String,
+        /// Print each step's time.
+        #[arg(short, long)]
+        verbose: bool,
+        #[command(flatten)]
+        cargo: CargoArgs,
+    },
     /// List the crates that ship styles, with their enabled features.
     Packages {
         #[command(flatten)]
@@ -110,6 +130,39 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Some(out) => trug::write_atomic(&out, &css)?,
                 None => print!("{css}"),
             }
+        }
+        Command::Build {
+            config,
+            release,
+            jobs,
+            public_url,
+            verbose,
+            cargo,
+        } => {
+            let path = config.unwrap_or_else(|| PathBuf::from(trug::config::FILE_NAME));
+            let (config, root) = if path.exists() {
+                let root = std::path::absolute(&path)?
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                (trug::config::Config::load(&path)?, root)
+            } else {
+                (trug::config::Config::default(), std::env::current_dir()?)
+            };
+            let mut public_url = public_url;
+            if !public_url.ends_with('/') {
+                public_url.push('/');
+            }
+            let report = trug::build::build(&trug::build::BuildRequest {
+                config,
+                root,
+                query: cargo.into(),
+                release,
+                jobs,
+                public_url,
+                verbose,
+            })?;
+            eprintln!("trug: built {}", report.dist.display());
         }
         Command::Packages { cargo } => {
             for package in Query::from(cargo).packages()? {

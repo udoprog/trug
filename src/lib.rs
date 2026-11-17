@@ -5,6 +5,10 @@
 //! `@use "pkg:<crate>"`, `@use "pkg:<crate>/<path>"`, and read which of the
 //! crate's features this build enables from `@use "pkg:<crate>/features"`.
 
+pub mod build;
+pub mod config;
+pub mod dist;
+pub mod html;
 pub mod importer;
 pub mod packages;
 

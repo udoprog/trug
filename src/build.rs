@@ -1,0 +1,520 @@
+//! The build pipeline: hooks, cargo, wasm-bindgen, the output index.html, the dist swap.
+
+use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use cargo_metadata::{Message, Metadata};
+use sha2::{Digest, Sha256};
+
+use crate::config::{Config, Hook, Paths, Stage};
+use crate::dist::Staging;
+use crate::html::{self, Directive};
+use crate::packages::Query;
+
+pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
+
+#[derive(Debug)]
+pub enum Error {
+    Io(PathBuf, io::Error),
+    Packages(crate::packages::Error),
+    Html(String),
+    Hook(String),
+    Cargo(String),
+    Bindgen(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Io(path, error) => write!(f, "{}: {error}", path.display()),
+            Error::Packages(error) => error.fmt(f),
+            Error::Html(m) | Error::Hook(m) | Error::Cargo(m) | Error::Bindgen(m) => m.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<crate::packages::Error> for Error {
+    fn from(error: crate::packages::Error) -> Self {
+        Error::Packages(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildRequest {
+    pub config: Config,
+    /// The directory holding Trug.toml.
+    pub root: PathBuf,
+    /// Cargo flags; `manifest_path` is overridden by the rust link.
+    pub query: Query,
+    pub release: bool,
+    pub jobs: Option<u32>,
+    /// Prefix of every URL in the output html.
+    pub public_url: String,
+    pub verbose: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Report {
+    pub steps: Vec<(&'static str, Duration)>,
+    pub dist: PathBuf,
+}
+
+struct Timer<'a> {
+    report: &'a mut Report,
+    verbose: bool,
+}
+
+impl Timer<'_> {
+    fn step<T>(
+        &mut self,
+        name: &'static str,
+        f: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let start = Instant::now();
+        let result = f();
+        let took = start.elapsed();
+        if self.verbose {
+            eprintln!("trug: {name}: {:.2}s", took.as_secs_f64());
+        }
+        self.report.steps.push((name, took));
+        result
+    }
+}
+
+pub fn build(request: &BuildRequest) -> Result<Report, Error> {
+    let paths = request.config.paths(&request.root);
+    let mut report = Report {
+        dist: paths.dist.clone(),
+        ..Report::default()
+    };
+    let mut timer = Timer {
+        report: &mut report,
+        verbose: request.verbose,
+    };
+    let html =
+        std::fs::read_to_string(&paths.target).map_err(|e| Error::Io(paths.target.clone(), e))?;
+    let directives = html::directives(&html);
+    let plan = Plan::new(&directives, &paths)?;
+
+    let staging = Staging::create(&paths.dist).map_err(|e| Error::Io(paths.dist.clone(), e))?;
+
+    timer.step("hooks", || {
+        for hook in &request.config.hooks {
+            run_hook(hook, &paths, staging.path())?;
+        }
+        Ok(())
+    })?;
+
+    let mut query = request.query.clone();
+    query.manifest_path = Some(plan.manifest.clone());
+    query.target = Some(WASM_TARGET.to_owned());
+
+    let wasm = timer.step("cargo", || cargo_build(&query, request))?;
+    let metadata = query.metadata()?;
+    let bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
+
+    timer.step("output", || {
+        let assets = bindgen.stage(staging.path())?;
+        let out = render(&html, &directives, &plan, &assets, &request.public_url);
+        let index = staging.path().join("index.html");
+        std::fs::write(&index, out).map_err(|e| Error::Io(index, e))
+    })?;
+
+    timer.step("swap", || {
+        staging.swap().map_err(|e| Error::Io(paths.dist.clone(), e))
+    })?;
+    Ok(report)
+}
+
+/// What the document's directives ask for.
+struct Plan {
+    manifest: PathBuf,
+    /// The rust link's index in the directives, if the document has one.
+    rust: Option<usize>,
+}
+
+impl Plan {
+    fn new(directives: &[Directive], paths: &Paths) -> Result<Self, Error> {
+        let dir = paths.target.parent().unwrap_or(&paths.root);
+        let mut rust = None;
+        for (at, directive) in directives.iter().enumerate() {
+            match directive.attr("rel") {
+                Some("rust") => {
+                    if rust.replace(at).is_some() {
+                        return Err(Error::Html("more than one rel=\"rust\" link".into()));
+                    }
+                }
+                other => {
+                    return Err(Error::Html(format!(
+                        "unsupported data-trug link rel={:?}",
+                        other.unwrap_or("")
+                    )));
+                }
+            }
+        }
+        let href = rust
+            .and_then(|at| directives[at].attr("href"))
+            .unwrap_or("Cargo.toml");
+        let mut manifest = dir.join(href);
+        if manifest.is_dir() {
+            manifest.push("Cargo.toml");
+        }
+        Ok(Self { manifest, rust })
+    }
+}
+
+fn run_hook(hook: &Hook, paths: &Paths, staging: &Path) -> Result<(), Error> {
+    match hook.stage {
+        Stage::PreBuild => {}
+    }
+    let status = Command::new(&hook.command)
+        .args(&hook.command_arguments)
+        .current_dir(&paths.root)
+        .env("TRUG_STAGING_DIR", staging)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| Error::Hook(format!("hook {}: {e}", hook.command)))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Hook(format!(
+            "hook {} failed: {status}",
+            hook.command
+        )))
+    }
+}
+
+fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> {
+    let manifest = query.manifest_path.as_ref().expect("manifest set by build");
+    let mut command = Command::new("cargo");
+    command
+        .args([
+            "build",
+            "--message-format=json-render-diagnostics",
+            "--target",
+        ])
+        .arg(WASM_TARGET)
+        .arg("--manifest-path")
+        .arg(manifest);
+    if request.release {
+        command.arg("--release");
+    }
+    if let Some(jobs) = request.jobs {
+        command.arg("--jobs").arg(jobs.to_string());
+    }
+    if !query.features.is_empty() {
+        command.arg("--features").arg(query.features.join(","));
+    }
+    for (on, flag) in [
+        (query.all_features, "--all-features"),
+        (query.no_default_features, "--no-default-features"),
+        (query.locked, "--locked"),
+        (query.offline, "--offline"),
+    ] {
+        if on {
+            command.arg(flag);
+        }
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Cargo(format!("cargo: {e}")))?;
+    let stdout = io::BufReader::new(child.stdout.take().expect("piped"));
+    let wanted = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
+    let mut wasm = None;
+    for message in Message::parse_stream(stdout).flatten() {
+        let Message::CompilerArtifact(artifact) = message else {
+            continue;
+        };
+        let same = std::fs::canonicalize(&artifact.manifest_path).is_ok_and(|path| path == wanted);
+        let cdylib = artifact
+            .target
+            .kind
+            .iter()
+            .any(|k| k.to_string() == "cdylib");
+        if same
+            && cdylib
+            && let Some(file) = artifact
+                .filenames
+                .iter()
+                .find(|f| f.extension() == Some("wasm"))
+        {
+            wasm = Some(file.clone().into_std_path_buf());
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| Error::Cargo(format!("cargo: {e}")))?;
+    if !status.success() {
+        return Err(Error::Cargo(format!("cargo build failed: {status}")));
+    }
+    wasm.ok_or_else(|| {
+        Error::Cargo(format!(
+            "{} builds no cdylib; add crate-type = [\"cdylib\"] to its [lib]",
+            manifest.display()
+        ))
+    })
+}
+
+/// The files wasm-bindgen produced.
+struct Bindgen {
+    dir: PathBuf,
+    name: String,
+}
+
+impl Bindgen {
+    fn stage(&self, staging: &Path) -> Result<Assets, Error> {
+        let copy = |file: String, stem: &str, ext: &str| -> Result<String, Error> {
+            let from = self.dir.join(&file);
+            let bytes = std::fs::read(&from).map_err(|e| Error::Io(from.clone(), e))?;
+            let name = hashed_name(stem, ext, &bytes);
+            let to = staging.join(&name);
+            std::fs::write(&to, bytes).map_err(|e| Error::Io(to, e))?;
+            Ok(name)
+        };
+        Ok(Assets {
+            js: copy(format!("{}.js", self.name), &self.name, "js")?,
+            wasm: copy(
+                format!("{}_bg.wasm", self.name),
+                &format!("{}_bg", self.name),
+                "wasm",
+            )?,
+        })
+    }
+}
+
+fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
+    let version = metadata
+        .packages
+        .iter()
+        .find(|p| p.name.as_str() == "wasm-bindgen")
+        .map(|p| p.version.to_string())
+        .ok_or_else(|| Error::Bindgen("the app does not depend on wasm-bindgen".into()))?;
+    let name = wasm
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bytes = std::fs::read(wasm).map_err(|e| Error::Io(wasm.to_owned(), e))?;
+    let key = hex(&Sha256::new()
+        .chain_update(&bytes)
+        .chain_update(&version)
+        .finalize());
+    let dir = metadata
+        .target_directory
+        .as_std_path()
+        .join("trug/bindgen")
+        .join(&key[..16]);
+    if dir.join(format!("{name}.js")).exists() && dir.join(format!("{name}_bg.wasm")).exists() {
+        return Ok(Bindgen { dir, name });
+    }
+    let binary = find_bindgen(&version)?;
+    let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| Error::Io(tmp.clone(), e))?;
+    let status = Command::new(&binary)
+        .args([
+            "--target",
+            "web",
+            "--no-typescript",
+            "--out-name",
+            &name,
+            "--out-dir",
+        ])
+        .arg(&tmp)
+        .arg(wasm)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| Error::Bindgen(format!("{}: {e}", binary.display())))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(Error::Bindgen(format!("wasm-bindgen failed: {status}")));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::rename(&tmp, &dir).map_err(|e| Error::Io(dir.clone(), e))?;
+    Ok(Bindgen { dir, name })
+}
+
+/// Where trug keeps tools it installs: `$TRUG_CACHE_DIR`, else `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`.
+pub fn cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TRUG_CACHE_DIR") {
+        return dir.into();
+    }
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        return Path::new(&dir).join("trug");
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    Path::new(&home).join(".cache/trug")
+}
+
+fn has_version(binary: &Path, version: &str) -> bool {
+    Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout).trim() == format!("wasm-bindgen {version}")
+        })
+}
+
+fn find_bindgen(version: &str) -> Result<PathBuf, Error> {
+    let on_path = PathBuf::from("wasm-bindgen");
+    if has_version(&on_path, version) {
+        return Ok(on_path);
+    }
+    let root = cache_dir().join("wasm-bindgen").join(version);
+    let cached = root.join("bin/wasm-bindgen");
+    if has_version(&cached, version) {
+        return Ok(cached);
+    }
+    eprintln!(
+        "trug: installing wasm-bindgen-cli {version} into {}",
+        root.display()
+    );
+    let mut command = Command::new("cargo");
+    command
+        .args([
+            "install",
+            "wasm-bindgen-cli",
+            "--locked",
+            "--version",
+            version,
+            "--root",
+        ])
+        .arg(&root)
+        .stdin(Stdio::null());
+    let status = command
+        .status()
+        .map_err(|e| Error::Bindgen(format!("cargo install: {e}")))?;
+    if !status.success() || !has_version(&cached, version) {
+        return Err(Error::Bindgen(format!(
+            "could not install wasm-bindgen-cli {version}"
+        )));
+    }
+    Ok(cached)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `stem-<hash of contents>.ext`.
+pub fn hashed_name(stem: &str, ext: &str, contents: &[u8]) -> String {
+    let digest = Sha256::digest(contents);
+    format!("{stem}-{}.{ext}", &hex(&digest)[..16])
+}
+
+/// Hashed file names of what the app loads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Assets {
+    pub js: String,
+    pub wasm: String,
+}
+
+fn loader(assets: &Assets, public_url: &str) -> String {
+    let js = format!("{public_url}{}", assets.js);
+    let wasm = format!("{public_url}{}", assets.wasm);
+    format!(
+        "<link rel=\"modulepreload\" href=\"{js}\" crossorigin>\
+<link rel=\"preload\" href=\"{wasm}\" as=\"fetch\" type=\"application/wasm\" crossorigin>\
+<script type=\"module\">import init from '{js}'; await init({{ module_or_path: '{wasm}' }});</script>"
+    )
+}
+
+/// The output document: the loader in place of the rust link (or before `</head>` when the document
+/// has none), every other data-trug element removed, all other bytes as they were.
+fn render(
+    html: &str,
+    directives: &[Directive],
+    plan: &Plan,
+    assets: &Assets,
+    public_url: &str,
+) -> String {
+    let loader = loader(assets, public_url);
+    let mut edits: Vec<_> = directives
+        .iter()
+        .enumerate()
+        .map(|(at, d)| {
+            let text = if Some(at) == plan.rust {
+                loader.clone()
+            } else {
+                String::new()
+            };
+            (d.range.clone(), text)
+        })
+        .collect();
+    if plan.rust.is_none() {
+        let at = html::head_end(html);
+        edits.push((at..at, loader));
+    }
+    html::replace(html, edits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assets() -> Assets {
+        Assets {
+            js: "app-1.js".into(),
+            wasm: "app_bg-2.wasm".into(),
+        }
+    }
+
+    fn plan_for(html: &str) -> (Vec<Directive>, Plan) {
+        let directives = html::directives(html);
+        let paths = Config::default().paths(Path::new("/app"));
+        let plan = Plan::new(&directives, &paths).unwrap();
+        (directives, plan)
+    }
+
+    #[test]
+    fn hashed_names_follow_contents() {
+        let a = hashed_name("app", "js", b"one");
+        assert_eq!(a, hashed_name("app", "js", b"one"));
+        assert_ne!(a, hashed_name("app", "js", b"two"));
+        assert!(a.starts_with("app-") && a.ends_with(".js"));
+    }
+
+    #[test]
+    fn explicit_rust_link_is_replaced_by_the_loader() {
+        let html = "<html><head>\r\n<title>x</title>\r\n<link data-trug rel=\"rust\" href=\"app/Cargo.toml\">\r\n</head><body></body></html>";
+        let (directives, plan) = plan_for(html);
+        assert_eq!(plan.manifest, Path::new("/app/app/Cargo.toml"));
+        let out = render(html, &directives, &plan, &assets(), "/");
+        assert!(out.starts_with("<html><head>\r\n<title>x</title>\r\n<link rel=\"modulepreload\" href=\"/app-1.js\" crossorigin>"));
+        assert!(out.contains(
+            "import init from '/app-1.js'; await init({ module_or_path: '/app_bg-2.wasm' });"
+        ));
+        assert!(out.contains("rel=\"preload\" href=\"/app_bg-2.wasm\" as=\"fetch\""));
+        assert!(out.ends_with("</script>\r\n</head><body></body></html>"));
+        assert!(!out.contains("data-trug"));
+    }
+
+    #[test]
+    fn implicit_rust_link_uses_cargo_toml_beside_index() {
+        let html = "<head><meta charset=\"utf-8\"></head><body></body>";
+        let (directives, plan) = plan_for(html);
+        assert_eq!(plan.manifest, Path::new("/app/Cargo.toml"));
+        assert!(plan.rust.is_none());
+        let out = render(html, &directives, &plan, &assets(), "/base/");
+        assert!(out.starts_with(
+            "<head><meta charset=\"utf-8\"><link rel=\"modulepreload\" href=\"/base/app-1.js\""
+        ));
+        assert!(out.ends_with("</script></head><body></body>"));
+    }
+
+    #[test]
+    fn rejects_unsupported_and_duplicate_links() {
+        let paths = Config::default().paths(Path::new("/app"));
+        let d = html::directives("<link data-trug rel=\"scss\" href=\"a.scss\">");
+        assert!(Plan::new(&d, &paths).is_err());
+        let d = html::directives("<link data-trug rel=\"rust\"><link data-trug rel=\"rust\">");
+        assert!(Plan::new(&d, &paths).is_err());
+    }
+}
