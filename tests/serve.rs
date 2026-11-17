@@ -336,3 +336,21 @@ fn plain_site_has_no_reload() {
     assert!(request(addr, "GET", "/_trug/reload").starts_with("HTTP/1.1 404"));
     assert!(request(addr, "GET", "/").ends_with("<p>index</p>"));
 }
+
+#[test]
+fn serves_dist_under_the_public_url() {
+    let dir = dist("public-url");
+    let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+    let site = Site::new(dir, &BTreeMap::new())
+        .unwrap()
+        .with_public_url("/app/");
+    let listeners = rt.block_on(bind(&["127.0.0.1".to_string()], 0)).unwrap();
+    let addr = listeners[0].local_addr().unwrap();
+    rt.spawn(async move { site.serve(listeners).await });
+
+    assert!(request(addr, "GET", "/app/app.js").ends_with("let a;"));
+    assert!(request(addr, "GET", "/app/").ends_with("<p>index</p>"));
+    assert!(request(addr, "GET", "/app").ends_with("<p>index</p>"));
+    assert!(request(addr, "GET", "/app/sub/").ends_with("<p>sub</p>"));
+    assert!(request(addr, "GET", "/app.js").ends_with("let a;"));
+}

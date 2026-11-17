@@ -208,7 +208,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 addresses
             };
             let port = port.or(serve.port).unwrap_or(8080);
-            let mut site = trug::serve::Site::new(dist, &serve.headers)?.with_proxies(&proxies)?;
+            let mut site = trug::serve::Site::new(dist, &serve.headers)?
+                .with_proxies(&proxies)?
+                .with_public_url(&report.public_url);
             if !no_watch {
                 site = site.with_reload();
             }

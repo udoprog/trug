@@ -69,6 +69,7 @@ pub struct BuildRequest {
 pub struct Report {
     pub steps: Vec<(&'static str, Duration)>,
     pub dist: PathBuf,
+    pub public_url: String,
 }
 
 struct Timer<'a> {
@@ -114,6 +115,7 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
             .or_else(|| base.as_ref().and_then(|b| b.attr("href")))
             .unwrap_or("/"),
     );
+    timer.report.public_url = public_url.clone();
     let plan = Plan::new(&directives, &paths)?;
 
     let staging = Staging::create(&paths.dist).map_err(|e| Error::Io(paths.dist.clone(), e))?;

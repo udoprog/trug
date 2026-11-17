@@ -61,6 +61,7 @@ struct Inner {
     headers: HeaderMap,
     proxies: Vec<Proxy>,
     reload: Option<broadcast::Sender<()>>,
+    public_prefix: Option<String>,
 }
 
 impl Site {
@@ -79,6 +80,7 @@ impl Site {
                 headers: map,
                 proxies: Vec::new(),
                 reload: None,
+                public_prefix: None,
             }),
         })
     }
@@ -94,6 +96,16 @@ impl Site {
             .expect("site not yet shared")
             .proxies = proxies;
         Ok(self)
+    }
+
+    /// Serves files requested under the build's public URL path (`/app/`) from
+    /// the dist root. Must be called before the site is cloned.
+    pub fn with_public_url(mut self, public_url: &str) -> Self {
+        let path = public_url.strip_prefix('/').map(|_| public_url);
+        Arc::get_mut(&mut self.inner)
+            .expect("site not yet shared")
+            .public_prefix = path.filter(|p| *p != "/").map(str::to_owned);
+        self
     }
 
     /// Serves `RELOAD_PATH` and injects the reload script into index pages.
@@ -274,7 +286,16 @@ async fn handle(State(site): State<Site>, request: Request) -> Response {
         Method::HEAD => true,
         _ => return response(StatusCode::METHOD_NOT_ALLOWED, &site, Body::empty()),
     };
-    let Some(rel) = relative(request.uri().path()) else {
+    let uri_path = request.uri().path();
+    let uri_path = match &site.inner.public_prefix {
+        Some(prefix) => match uri_path.strip_prefix(prefix.as_str()) {
+            Some(rest) => &uri_path[uri_path.len() - rest.len() - 1..],
+            None if uri_path == prefix.trim_end_matches('/') => "/",
+            None => uri_path,
+        },
+        None => uri_path,
+    };
+    let Some(rel) = relative(uri_path) else {
         return response(StatusCode::BAD_REQUEST, &site, Body::empty());
     };
     let dist = site.inner.dist.read().unwrap().clone();

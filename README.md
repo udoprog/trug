@@ -139,6 +139,49 @@ for paths that are not files (SPA routes), and the `[[proxy]]` mounts. Unless
 `--no-watch` is given it rebuilds when files under `[watch]` change, one build at
 a time; the served `dist` is only ever swapped by a successful build.
 
+## Serve
+
+`trug serve` builds once, serves `dist` and rebuilds when sources change:
+
+```
+trug serve --port 8080 --address 127.0.0.1 --no-watch
+```
+
+It takes the build's flags and the app's cargo flags. `--address` (repeatable)
+and `--port` override `[serve]`; without either it listens on `127.0.0.1:8080`.
+Unknown paths without an extension get `index.html`, so SPA routes work. If the
+page has a public URL (`<base data-trug-public-url href="/app/">` or
+`--public-url`), files are also served under that path.
+
+```toml
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+headers = { "Cache-Control" = "no-cache" }
+
+[watch]
+watch = [".", "../src", "../style"]
+ignore = ["style/generated/**"]
+debounce_ms = 200
+```
+
+- `[serve] headers` are added to every response.
+- `[watch] watch` lists the paths to watch, relative to `Trug.toml`; the
+  directory of `Trug.toml` by default. `ignore` holds globs of paths whose
+  changes are ignored. `dist`, its staging directories, `target` and `.git`
+  are always ignored, so a file a `pre_build` hook writes inside a watched
+  directory must be listed in `ignore`, or each build triggers the next.
+- A change starts one rebuild after `debounce_ms` of quiet. Builds run one at
+  a time; changes during a build queue one more.
+- Each rebuild goes to a staging directory that replaces `dist` only on
+  success. A failed build prints its error and leaves the served page as it
+  was.
+- Served index pages get a script that listens on `/_trug/reload` (server-sent
+  events) and reloads the page after each successful swap, never after a
+  failed build.
+- `--no-watch` serves the first build only: no watching, no reload script,
+  no `/_trug/reload`.
+
 ## Proxies
 
 `trug serve` forwards requests under a path prefix to a backend, before static
