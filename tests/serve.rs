@@ -173,6 +173,7 @@ mod proxy {
             backend,
             rewrite: rewrite.map(Into::into),
             no_redirect,
+            ws: false,
         }
     }
 
@@ -214,6 +215,70 @@ mod proxy {
         drop(free);
         let addr = start(&[proxy(format!("http://{b}/api/"), None, false)]);
         assert!(get(addr, "/api/x").starts_with("HTTP/1.1 502"));
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn websocket_round_trip() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let b = std_listener.local_addr().unwrap();
+        let mut p = proxy(format!("ws://{b}/ws"), Some("/socket"), false);
+        p.ws = true;
+        let addr = start(&[p]);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
+                        assert_eq!(req.uri().path(), "/ws");
+                        assert_eq!(req.uri().query(), Some("a=1"));
+                        Ok(res)
+                    },
+                )
+                .await
+                .unwrap();
+                while let Some(Ok(message)) = ws.next().await {
+                    if message.is_text() || message.is_binary() {
+                        ws.send(message).await.unwrap();
+                    }
+                }
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/socket?a=1"))
+                .await
+                .unwrap();
+            ws.send(Message::text("hello")).await.unwrap();
+            assert_eq!(ws.next().await.unwrap().unwrap(), Message::text("hello"));
+            ws.send(Message::binary(vec![1u8, 2, 3])).await.unwrap();
+            assert_eq!(
+                ws.next().await.unwrap().unwrap(),
+                Message::binary(vec![1u8, 2, 3])
+            );
+            ws.close(None).await.unwrap();
+            assert!(
+                ws.next()
+                    .await
+                    .is_none_or(|m| m.is_err() || m.unwrap().is_close())
+            );
+        });
+    }
+
+    #[test]
+    fn websocket_backend_down_is_bad_gateway() {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = free.local_addr().unwrap();
+        drop(free);
+        let mut p = proxy(format!("ws://{b}/ws"), None, false);
+        p.ws = true;
+        let addr = start(&[p]);
+        let out = get(addr, "/ws");
+        assert!(out.starts_with("HTTP/1.1 502"), "{out}");
     }
 }
 

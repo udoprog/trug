@@ -64,6 +64,9 @@ pub struct Proxy {
     /// Hand backend redirects to the client instead of following them.
     #[serde(default)]
     pub no_redirect: bool,
+    /// Proxy WebSocket connections; `backend` is then a `ws://` URL.
+    #[serde(default)]
+    pub ws: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]

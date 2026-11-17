@@ -3,10 +3,14 @@
 use std::fmt;
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequest, Request};
 use axum::http::header::{HOST, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Response;
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite as ts;
 
 use crate::config;
 
@@ -42,6 +46,7 @@ impl std::error::Error for Error {}
 
 pub struct Proxy {
     mount: String,
+    ws: bool,
     scheme: String,
     authority: String,
     base: String,
@@ -53,8 +58,13 @@ impl Proxy {
         let bad = |why| Error::Backend(config.backend.clone(), why);
         let uri: Uri = config.backend.parse().map_err(|_| bad("not a URL"))?;
         let scheme = uri.scheme_str().ok_or_else(|| bad("missing scheme"))?;
-        if scheme != "http" {
-            return Err(bad("only http is supported"));
+        let expected = if config.ws { "ws" } else { "http" };
+        if scheme != expected {
+            return Err(bad(if config.ws {
+                "a `ws` proxy needs a ws:// backend"
+            } else {
+                "only http is supported"
+            }));
         }
         let authority = uri.authority().ok_or_else(|| bad("missing host"))?;
         let mount = match &config.rewrite {
@@ -80,6 +90,7 @@ impl Proxy {
             .map_err(Error::Client)?;
         Ok(Self {
             mount: mount.to_owned(),
+            ws: config.ws,
             scheme: scheme.to_owned(),
             authority: authority.to_string(),
             base: uri.path().trim_start_matches('/').to_owned(),
@@ -111,7 +122,12 @@ impl Proxy {
     }
 
     pub async fn forward(&self, request: Request) -> Response {
-        match self.try_forward(request).await {
+        let result = if self.ws {
+            self.try_upgrade(request).await
+        } else {
+            self.try_forward(request).await
+        };
+        match result {
             Ok(response) => response,
             Err(error) => {
                 eprintln!("trug: proxy error: {error}");
@@ -120,6 +136,17 @@ impl Proxy {
                 response
             }
         }
+    }
+
+    async fn try_upgrade(&self, request: Request) -> Result<Response, Box<dyn std::error::Error>> {
+        let url = self
+            .target(request.uri().path(), request.uri().query())
+            .ok_or("path outside the proxy mount")?;
+        let upgrade = WebSocketUpgrade::from_request(request, &())
+            .await
+            .map_err(|e| e.to_string())?;
+        let (backend, _) = tokio_tungstenite::connect_async(url).await?;
+        Ok(upgrade.on_upgrade(|client| pipe(client, backend)))
     }
 
     async fn try_forward(&self, request: Request) -> Result<Response, Box<dyn std::error::Error>> {
@@ -161,6 +188,64 @@ impl Proxy {
     }
 }
 
+type Backend =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn pipe(client: WebSocket, backend: Backend) {
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut backend_tx, mut backend_rx) = backend.split();
+    let up = async {
+        while let Some(Ok(message)) = client_rx.next().await {
+            if backend_tx.send(to_backend(message)).await.is_err() {
+                break;
+            }
+        }
+        let _ = backend_tx.close().await;
+    };
+    let down = async {
+        while let Some(Ok(message)) = backend_rx.next().await {
+            let Some(message) = to_client(message) else {
+                continue;
+            };
+            if client_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_tx.close().await;
+    };
+    tokio::select! {
+        _ = up => {}
+        _ = down => {}
+    }
+}
+
+fn to_backend(message: Message) -> ts::Message {
+    match message {
+        Message::Text(text) => ts::Message::text(text.as_str()),
+        Message::Binary(bytes) => ts::Message::Binary(bytes),
+        Message::Ping(bytes) => ts::Message::Ping(bytes),
+        Message::Pong(bytes) => ts::Message::Pong(bytes),
+        Message::Close(frame) => ts::Message::Close(frame.map(|f| ts::protocol::CloseFrame {
+            code: f.code.into(),
+            reason: f.reason.as_str().into(),
+        })),
+    }
+}
+
+fn to_client(message: ts::Message) -> Option<Message> {
+    Some(match message {
+        ts::Message::Text(text) => Message::Text(text.as_str().into()),
+        ts::Message::Binary(bytes) => Message::Binary(bytes),
+        ts::Message::Ping(bytes) => Message::Ping(bytes),
+        ts::Message::Pong(bytes) => Message::Pong(bytes),
+        ts::Message::Close(frame) => Message::Close(frame.map(|f| CloseFrame {
+            code: f.code.into(),
+            reason: f.reason.as_str().into(),
+        })),
+        ts::Message::Frame(_) => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +255,7 @@ mod tests {
             backend: backend.into(),
             rewrite: rewrite.map(Into::into),
             no_redirect: false,
+            ws: false,
         })
         .unwrap()
     }
@@ -216,6 +302,7 @@ mod tests {
                 backend: backend.into(),
                 rewrite: rewrite.map(Into::into),
                 no_redirect: false,
+                ws: false,
             })
             .is_err()
         };
@@ -223,5 +310,6 @@ mod tests {
         assert!(bad("http://h:1/x", Some("api")));
         assert!(bad("https://h/x", None));
         assert!(bad("/x", None));
+        assert!(bad("ws://h:1/x", None));
     }
 }

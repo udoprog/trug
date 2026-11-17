@@ -61,3 +61,28 @@ Both take the app's cargo flags: `--manifest-path`, `--target` (default
 `--style` and `-o` (written atomically, so a failed build keeps the old file).
 
 From Rust, `trug::build_css(&CssRequest)` does the same in-process.
+
+## Proxies
+
+`trug serve` forwards requests under a path prefix to a backend, before static
+files and the SPA fallback. Each is a `[[proxy]]` table in `Trug.toml`:
+
+```toml
+[[proxy]]
+backend = "http://127.0.0.1:8150/api/"
+no_redirect = true
+
+[[proxy]]
+rewrite = "/ws"
+backend = "ws://127.0.0.1:8160/ws"
+ws = true
+```
+
+- `backend`: the backend URL. Its path is the mount prefix unless `rewrite`
+  is set.
+- `rewrite`: the prefix trug serves, replaced by the backend's path.
+- `no_redirect`: hand backend redirects to the client instead of following them.
+- `ws`: proxy WebSocket connections. `backend` must be a `ws://` URL (no
+  TLS); the client is upgraded once the backend accepts, and text, binary,
+  ping, pong and close frames are piped both ways. A backend that is down
+  gives 502. Subprotocol negotiation is not forwarded.
