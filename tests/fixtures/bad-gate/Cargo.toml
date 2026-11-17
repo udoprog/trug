@@ -1,0 +1,10 @@
+[package]
+name = "bad-gate"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+real = []
+
+[package.metadata.trug.gate]
+index = "nope"

@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::{CargoOpt, DependencyKind, Metadata, MetadataCommand, Package, PackageId};
+use sasso::{CanonicalizeContext, FsImporter, Importer};
 
 /// The `[package.metadata.<KEY>]` table a package opts in with.
 pub const METADATA_KEY: &str = "trug";
@@ -23,6 +24,9 @@ pub struct StylePackage {
     pub entry: PathBuf,
     /// The package's features enabled in this build.
     pub features: BTreeSet<String>,
+    /// `[package.metadata.trug.gate]`: each gated stylesheet, resolved to its
+    /// path, with the feature that owns it.
+    pub gate: BTreeMap<PathBuf, String>,
 }
 
 /// How to ask cargo for the app's dependency graph: the same flags the app is built with.
@@ -40,7 +44,7 @@ pub struct Query {
 #[derive(Debug)]
 pub enum Error {
     Cargo(cargo_metadata::Error),
-    /// A package's `[package.metadata.trug]` that isn't a table of strings.
+    /// A package's `[package.metadata.trug]` that is malformed.
     Metadata {
         package: String,
         message: String,
@@ -195,6 +199,7 @@ fn style_package<F: AsRef<str>>(
             });
         }
     }
+    let gate = gate(package, &name, &dir, table.get("gate"))?;
     Ok(Some(StylePackage {
         name: normalize(&name),
         version: package.version.to_string(),
@@ -204,7 +209,57 @@ fn style_package<F: AsRef<str>>(
             .iter()
             .map(|feature| feature.as_ref().to_owned())
             .collect(),
+        gate,
     }))
+}
+
+fn gate(
+    package: &Package,
+    name: &str,
+    dir: &Path,
+    table: Option<&serde_json::Value>,
+) -> Result<BTreeMap<PathBuf, String>, Error> {
+    let error = |message: String| Error::Metadata {
+        package: name.to_owned(),
+        message,
+    };
+    let Some(table) = table else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(table) = table.as_object() else {
+        return Err(error("`gate` must be a table".to_owned()));
+    };
+    let fs = FsImporter::new(Vec::new());
+    let ctx = CanonicalizeContext {
+        from_import: false,
+        containing_url: None,
+    };
+    let mut gate = BTreeMap::new();
+    for (file, feature) in table {
+        let Some(feature) = feature.as_str() else {
+            return Err(error(format!("gate.{file}: must be a feature name")));
+        };
+        if !package.features.contains_key(feature) {
+            return Err(error(format!("gate.{file}: no feature named {feature}")));
+        }
+        if file.starts_with('/') || file.split('/').any(|part| part == "..") {
+            return Err(error(format!(
+                "gate.{file}: must stay inside {}",
+                dir.display()
+            )));
+        }
+        let found = fs
+            .canonicalize(&dir.join(file).to_string_lossy(), &ctx)
+            .map_err(|e| error(format!("gate.{file}: {}", e.message)))?
+            .ok_or_else(|| {
+                error(format!(
+                    "gate.{file}: no such stylesheet in {}",
+                    dir.display()
+                ))
+            })?;
+        gate.insert(PathBuf::from(found.as_str()), feature.to_owned());
+    }
+    Ok(gate)
 }
 
 /// crates.io treats `-` and `_` alike, so `pkg:` does too.

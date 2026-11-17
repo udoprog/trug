@@ -9,3 +9,6 @@ base = []
 extra = []
 
 [package.metadata.trug]
+
+[package.metadata.trug.gate]
+gated = "extra"

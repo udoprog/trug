@@ -160,3 +160,40 @@ fn app_fixture_stylesheet() {
         "{css}"
     );
 }
+
+fn build_extra(source: &str, tag: &str) -> String {
+    let mut request = request(source, tag);
+    request.query.features = vec!["extra".to_owned()];
+    trug::build_css(&request).unwrap()
+}
+
+#[test]
+fn gated_pkg_load() {
+    let off = build("@use \"pkg:dep-a/gated\";", "gate-pkg-off").unwrap();
+    assert!(!off.contains(".a-gated"), "{off}");
+
+    let on = build_extra("@use \"pkg:dep-a/gated\";", "gate-pkg-on");
+    assert!(on.contains(".a-gated"), "{on}");
+}
+
+#[test]
+fn gated_relative_load() {
+    let off = build("@use \"pkg:dep-a/uses_gated\";", "gate-rel-off").unwrap();
+    assert!(off.contains(".uses-gated"), "{off}");
+    assert!(!off.contains(".a-gated"), "{off}");
+
+    let on = build_extra("@use \"pkg:dep-a/uses_gated\";", "gate-rel-on");
+    assert!(on.contains(".uses-gated"), "{on}");
+    assert!(on.contains(".a-gated"), "{on}");
+}
+
+#[test]
+fn gate_with_unknown_feature() {
+    let mut request = request("@use \"pkg:bad-gate\" as x;", "gate-unknown");
+    request.query = query("bad-gate");
+    let error = trug::build_css(&request).unwrap_err().to_string();
+    assert!(
+        error.contains("gate.index: no feature named nope"),
+        "{error}"
+    );
+}

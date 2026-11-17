@@ -24,6 +24,20 @@ entry = "_index.scss"  # default; inside dir
 The style directory must be in the package's `include` so it is published.
 Crate names match with `-` and `_` alike.
 
+A crate can tie a stylesheet to the Cargo feature that owns it:
+
+```toml
+[package.metadata.trug.gate]
+buttons = "button"
+```
+
+Each key names a file in the style directory as `pkg:<crate>/<key>` would
+(`buttons` is `_buttons.scss` or `buttons.scss`). When the feature is off in
+the app's build, that file loads as an empty stylesheet, through `pkg:` and
+through relative loads alike, so the Sass needs no conditional `@use` and still
+compiles on its own. A gated file should only emit CSS, since its members are
+gone when it is off. An unknown feature or a key that names no file is an error.
+
 <br>
 
 ## `pkg:` URLs

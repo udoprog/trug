@@ -1,6 +1,6 @@
 //! A sasso importer that adds `pkg:<crate>` URLs to the file system's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -23,19 +23,34 @@ const FEATURES: &str = "features";
 /// - anything else: relative to the containing file, then the load paths.
 ///
 /// Package files are keyed by their path, so a file reached both as
-/// `pkg:<crate>/x` and relatively from inside the package loads once.
+/// `pkg:<crate>/x` and relatively from inside the package loads once. A file
+/// gated on a feature this build leaves off loads as an empty stylesheet,
+/// whichever route reaches it.
 pub struct PackageImporter {
     packages: BTreeMap<String, StylePackage>,
+    gated_off: HashSet<String>,
     fs: FsImporter,
 }
 
 impl PackageImporter {
     pub fn new(packages: impl IntoIterator<Item = StylePackage>, load_paths: Vec<PathBuf>) -> Self {
+        let packages: BTreeMap<_, _> = packages
+            .into_iter()
+            .map(|package| (package.name.clone(), package))
+            .collect();
+        let gated_off = packages
+            .values()
+            .flat_map(|package| {
+                package
+                    .gate
+                    .iter()
+                    .filter(|(_, feature)| !package.features.contains(*feature))
+                    .map(|(path, _)| path.to_string_lossy().into_owned())
+            })
+            .collect();
         Self {
-            packages: packages
-                .into_iter()
-                .map(|package| (package.name.clone(), package))
-                .collect(),
+            packages,
+            gated_off,
             fs: FsImporter::new(load_paths),
         }
     }
@@ -104,6 +119,13 @@ impl Importer for PackageImporter {
     }
 
     fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        if self.gated_off.contains(canonical.as_str()) {
+            return Ok(Some(ImporterResult {
+                contents: String::new(),
+                syntax: Syntax::Scss,
+                source_map_url: None,
+            }));
+        }
         let Some(rest) = canonical.as_str().strip_prefix(SCHEME) else {
             return self.fs.load(canonical);
         };
