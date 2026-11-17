@@ -11,6 +11,7 @@ use axum::response::Response;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite as ts;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::config;
 
@@ -142,10 +143,21 @@ impl Proxy {
         let url = self
             .target(request.uri().path(), request.uri().query())
             .ok_or("path outside the proxy mount")?;
+        let headers = request.headers().clone();
         let upgrade = WebSocketUpgrade::from_request(request, &())
             .await
             .map_err(|e| e.to_string())?;
-        let (backend, _) = tokio_tungstenite::connect_async(url).await?;
+        let mut handshake = url.into_client_request()?;
+        for (name, value) in &forwarded(&headers) {
+            if !name.as_str().starts_with("sec-websocket-") {
+                handshake.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+        let backend = match tokio_tungstenite::connect_async(handshake).await {
+            Ok((backend, _)) => backend,
+            Err(ts::Error::Http(refusal)) => return Ok(refused(*refusal)),
+            Err(error) => return Err(error.into()),
+        };
         Ok(upgrade.on_upgrade(|client| pipe(client, backend)))
     }
 
@@ -155,18 +167,7 @@ impl Proxy {
             .target(parts.uri.path(), parts.uri.query())
             .ok_or("path outside the proxy mount")?;
         let body = axum::body::to_bytes(body, usize::MAX).await?;
-        let mut headers = HeaderMap::new();
-        for (name, value) in &parts.headers {
-            if name == HOST {
-                headers.insert(HeaderName::from_static("x-forwarded-host"), value.clone());
-                headers.insert(
-                    HeaderName::from_static("x-forwarded-proto"),
-                    HeaderValue::from_static("http"),
-                );
-            } else if !HOP_BY_HOP.contains(&name.as_str()) {
-                headers.append(name.clone(), value.clone());
-            }
-        }
+        let mut headers = forwarded(&parts.headers);
         headers.insert(HOST, HeaderValue::try_from(self.authority.as_str())?);
         let upstream = self
             .client
@@ -186,6 +187,37 @@ impl Proxy {
         }
         Ok(response)
     }
+}
+
+/// The client's headers for the backend: hop-by-hop ones dropped, `Host` moved
+/// to `X-Forwarded-Host`.
+fn forwarded(headers: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for (name, value) in headers {
+        if name == HOST {
+            out.insert(HeaderName::from_static("x-forwarded-host"), value.clone());
+            out.insert(
+                HeaderName::from_static("x-forwarded-proto"),
+                HeaderValue::from_static("http"),
+            );
+        } else if !HOP_BY_HOP.contains(&name.as_str()) {
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
+/// A backend's refusal of the upgrade, passed through to the client.
+fn refused(refusal: ts::http::Response<Option<Vec<u8>>>) -> Response {
+    let (parts, body) = refusal.into_parts();
+    let mut response = Response::new(Body::from(body.unwrap_or_default()));
+    *response.status_mut() = parts.status;
+    for (name, value) in &parts.headers {
+        if !HOP_BY_HOP.contains(&name.as_str()) {
+            response.headers_mut().append(name.clone(), value.clone());
+        }
+    }
+    response
 }
 
 type Backend =

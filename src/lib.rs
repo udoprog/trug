@@ -252,8 +252,10 @@
 //! - `no_redirect`: hand backend redirects to the client instead of following them.
 //! - `ws`: proxy WebSocket connections. `backend` must be a `ws://` URL (no
 //!   TLS); the client is upgraded once the backend accepts, and text, binary,
-//!   ping, pong and close frames are piped both ways. A backend that is down
-//!   gives 502. Subprotocol negotiation is not forwarded.
+//!   ping, pong and close frames are piped both ways. The client's request
+//!   headers (cookies, `Origin`, ...) go with the backend handshake, as for
+//!   HTTP. A backend that refuses the upgrade passes its response through; one
+//!   that is down gives 502. Subprotocol negotiation is not forwarded.
 
 pub mod build;
 pub mod config;

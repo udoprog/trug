@@ -224,6 +224,7 @@ mod proxy {
     fn websocket_round_trip() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
         let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         std_listener.set_nonblocking(true).unwrap();
@@ -241,6 +242,11 @@ mod proxy {
                     |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
                         assert_eq!(req.uri().path(), "/ws");
                         assert_eq!(req.uri().query(), Some("a=1"));
+                        let header = |name| req.headers()[name].to_str().unwrap();
+                        assert_eq!(header("cookie"), "session=abc");
+                        assert_eq!(header("origin"), "http://app.test");
+                        assert_eq!(header("host"), b.to_string());
+                        assert_eq!(header("x-forwarded-host"), addr.to_string());
                         Ok(res)
                     },
                 )
@@ -252,9 +258,13 @@ mod proxy {
                     }
                 }
             });
-            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/socket?a=1"))
-                .await
+            let mut request = format!("ws://{addr}/socket?a=1")
+                .into_client_request()
                 .unwrap();
+            let headers = request.headers_mut();
+            headers.insert("cookie", "session=abc".parse().unwrap());
+            headers.insert("origin", "http://app.test".parse().unwrap());
+            let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
             ws.send(Message::text("hello")).await.unwrap();
             assert_eq!(ws.next().await.unwrap().unwrap(), Message::text("hello"));
             ws.send(Message::binary(vec![1u8, 2, 3])).await.unwrap();
@@ -269,6 +279,34 @@ mod proxy {
                     .is_none_or(|m| m.is_err() || m.unwrap().is_close())
             );
         });
+    }
+
+    #[test]
+    fn websocket_refusal_passes_through() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 4\r\n\r\nnope")
+                .unwrap();
+        });
+        let mut p = proxy(format!("ws://{b}/ws"), None, false);
+        p.ws = true;
+        let addr = start(&[p]);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let error = rt
+            .block_on(tokio_tungstenite::connect_async(format!("ws://{addr}/ws")))
+            .unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("{error}");
+        };
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.body().as_deref(), Some(&b"nope"[..]));
     }
 
     #[test]
