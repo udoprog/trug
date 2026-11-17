@@ -1,5 +1,6 @@
 //! The build pipeline: hooks, cargo, wasm-bindgen, the output index.html, the dist swap.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub enum Error {
     Hook(String),
     Cargo(String),
     Bindgen(String),
+    Css(String),
 }
 
 impl fmt::Display for Error {
@@ -31,7 +33,11 @@ impl fmt::Display for Error {
         match self {
             Error::Io(path, error) => write!(f, "{}: {error}", path.display()),
             Error::Packages(error) => error.fmt(f),
-            Error::Html(m) | Error::Hook(m) | Error::Cargo(m) | Error::Bindgen(m) => m.fmt(f),
+            Error::Html(m)
+            | Error::Hook(m)
+            | Error::Cargo(m)
+            | Error::Bindgen(m)
+            | Error::Css(m) => m.fmt(f),
         }
     }
 }
@@ -114,13 +120,24 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     query.manifest_path = Some(plan.manifest.clone());
     query.target = Some(WASM_TARGET.to_owned());
 
+    let links = timer.step("styles", || {
+        stage_styles(&plan.styles, &query, staging.path(), &request.public_url)
+    })?;
+
     let wasm = timer.step("cargo", || cargo_build(&query, request))?;
     let metadata = query.metadata()?;
     let bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
 
     timer.step("output", || {
         let assets = bindgen.stage(staging.path())?;
-        let out = render(&html, &directives, &plan, &assets, &request.public_url);
+        let out = render(
+            &html,
+            &directives,
+            &plan,
+            &assets,
+            &links,
+            &request.public_url,
+        );
         let index = staging.path().join("index.html");
         std::fs::write(&index, out).map_err(|e| Error::Io(index, e))
     })?;
@@ -136,18 +153,37 @@ struct Plan {
     manifest: PathBuf,
     /// The rust link's index in the directives, if the document has one.
     rust: Option<usize>,
+    styles: Vec<Style>,
+}
+
+/// A `rel="scss"` or `rel="css"` link: the directive's index and the source file.
+struct Style {
+    at: usize,
+    scss: bool,
+    path: PathBuf,
 }
 
 impl Plan {
     fn new(directives: &[Directive], paths: &Paths) -> Result<Self, Error> {
         let dir = paths.target.parent().unwrap_or(&paths.root);
         let mut rust = None;
+        let mut styles = Vec::new();
         for (at, directive) in directives.iter().enumerate() {
             match directive.attr("rel") {
                 Some("rust") => {
                     if rust.replace(at).is_some() {
                         return Err(Error::Html("more than one rel=\"rust\" link".into()));
                     }
+                }
+                Some(rel @ ("scss" | "css")) => {
+                    let href = directive
+                        .attr("href")
+                        .ok_or_else(|| Error::Html(format!("rel=\"{rel}\" link has no href")))?;
+                    styles.push(Style {
+                        at,
+                        scss: rel == "scss",
+                        path: dir.join(href),
+                    });
                 }
                 other => {
                     return Err(Error::Html(format!(
@@ -164,8 +200,46 @@ impl Plan {
         if manifest.is_dir() {
             manifest.push("Cargo.toml");
         }
-        Ok(Self { manifest, rust })
+        Ok(Self {
+            manifest,
+            rust,
+            styles,
+        })
     }
+}
+
+/// Compiles or copies each style into the staging dir under a hashed name; returns the link
+/// replacing each directive, by directive index.
+fn stage_styles(
+    styles: &[Style],
+    query: &Query,
+    staging: &Path,
+    public_url: &str,
+) -> Result<HashMap<usize, String>, Error> {
+    let mut links = HashMap::new();
+    for style in styles {
+        let contents = if style.scss {
+            let mut css = crate::CssRequest::new(&style.path);
+            css.query = query.clone();
+            crate::build_css(&css)
+                .map_err(|e| Error::Css(format!("{}: {e}", style.path.display())))?
+        } else {
+            std::fs::read_to_string(&style.path).map_err(|e| Error::Io(style.path.clone(), e))?
+        };
+        let stem = style
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = hashed_name(&stem, "css", contents.as_bytes());
+        let to = staging.join(&name);
+        std::fs::write(&to, contents).map_err(|e| Error::Io(to, e))?;
+        links.insert(
+            style.at,
+            format!("<link rel=\"stylesheet\" href=\"{public_url}{name}\">"),
+        );
+    }
+    Ok(links)
 }
 
 fn run_hook(hook: &Hook, paths: &Paths, staging: &Path) -> Result<(), Error> {
@@ -433,6 +507,7 @@ fn render(
     directives: &[Directive],
     plan: &Plan,
     assets: &Assets,
+    links: &HashMap<usize, String>,
     public_url: &str,
 ) -> String {
     let loader = loader(assets, public_url);
@@ -443,7 +518,7 @@ fn render(
             let text = if Some(at) == plan.rust {
                 loader.clone()
             } else {
-                String::new()
+                links.get(&at).cloned().unwrap_or_default()
             };
             (d.range.clone(), text)
         })
@@ -486,7 +561,7 @@ mod tests {
         let html = "<html><head>\r\n<title>x</title>\r\n<link data-trug rel=\"rust\" href=\"app/Cargo.toml\">\r\n</head><body></body></html>";
         let (directives, plan) = plan_for(html);
         assert_eq!(plan.manifest, Path::new("/app/app/Cargo.toml"));
-        let out = render(html, &directives, &plan, &assets(), "/");
+        let out = render(html, &directives, &plan, &assets(), &HashMap::new(), "/");
         assert!(out.starts_with("<html><head>\r\n<title>x</title>\r\n<link rel=\"modulepreload\" href=\"/app-1.js\" crossorigin>"));
         assert!(out.contains(
             "import init from '/app-1.js'; await init({ module_or_path: '/app_bg-2.wasm' });"
@@ -502,7 +577,14 @@ mod tests {
         let (directives, plan) = plan_for(html);
         assert_eq!(plan.manifest, Path::new("/app/Cargo.toml"));
         assert!(plan.rust.is_none());
-        let out = render(html, &directives, &plan, &assets(), "/base/");
+        let out = render(
+            html,
+            &directives,
+            &plan,
+            &assets(),
+            &HashMap::new(),
+            "/base/",
+        );
         assert!(out.starts_with(
             "<head><meta charset=\"utf-8\"><link rel=\"modulepreload\" href=\"/base/app-1.js\""
         ));
@@ -512,9 +594,58 @@ mod tests {
     #[test]
     fn rejects_unsupported_and_duplicate_links() {
         let paths = Config::default().paths(Path::new("/app"));
-        let d = html::directives("<link data-trug rel=\"scss\" href=\"a.scss\">");
+        let d = html::directives("<link data-trug rel=\"sass\" href=\"a.scss\">");
         assert!(Plan::new(&d, &paths).is_err());
         let d = html::directives("<link data-trug rel=\"rust\"><link data-trug rel=\"rust\">");
         assert!(Plan::new(&d, &paths).is_err());
+    }
+
+    #[test]
+    fn scss_and_css_links_are_hashed_and_replaced() {
+        let root = std::env::temp_dir().join(format!("trug-styles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            root.join("main.scss"),
+            "@use \"pkg:dep-a\" as x;\na { b: c }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("plain.css"), "p { d: e }\n").unwrap();
+        let html = "<head><link data-trug rel=\"scss\" href=\"main.scss\">\n<link data-trug rel=\"css\" href=\"plain.css\"></head>";
+        let directives = html::directives(html);
+        let paths = Config::default().paths(&root);
+        let plan = Plan::new(&directives, &paths).unwrap();
+        assert_eq!(plan.styles.len(), 2);
+        let query = Query {
+            manifest_path: Some(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/app/Cargo.toml"),
+            ),
+            offline: true,
+            ..Query::default()
+        };
+        let links = stage_styles(&plan.styles, &query, &staging, "/pub/").unwrap();
+        let out = render(html, &directives, &plan, &assets(), &links, "/pub/");
+        let mut files: Vec<_> = std::fs::read_dir(&staging)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files[0].starts_with("main-") && files[1].starts_with("plain-"));
+        for name in &files {
+            assert!(
+                out.contains(&format!("<link rel=\"stylesheet\" href=\"/pub/{name}\">")),
+                "{out}"
+            );
+        }
+        let main = std::fs::read_to_string(staging.join(&files[0])).unwrap();
+        assert!(main.contains("a {"), "{main}");
+        assert_eq!(
+            std::fs::read_to_string(staging.join(&files[1])).unwrap(),
+            "p { d: e }\n"
+        );
+        assert!(!out.contains("data-trug") && !out.contains(".scss"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
