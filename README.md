@@ -118,11 +118,18 @@ Three renames, and only these; trug does not read the `data-trunk` forms:
 | `<base data-trunk-public-url>` | `<base data-trug-public-url>` |
 
 The `rel` values trug supports are `rust` (at most one; `href` is the crate
-directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (with
-`data-target-path`) and `icon`. Any other `rel` is an error. Styles and icons are
+directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (`data-target-path`
+is optional and defaults to the directory's own name) and `icon`. Any other `rel` is an error. Styles and icons are
 written under content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
 like `trug css` does and, like trunk, embed a source map with the sources in dev
 builds and none with `--release`.
+
+trug's output differs from trunk's:
+
+- `index.html` has no SRI `integrity` attributes, no `window.wasmBindings` and no
+  `TrunkApplicationStarted` event.
+- The wasm is named `web_bg-HASH.wasm`, where trunk writes `web-HASH_bg.wasm`.
+- There is no `.trunk-lock`.
 
 <br>
 
