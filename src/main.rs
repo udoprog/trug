@@ -51,6 +51,27 @@ enum Command {
         #[command(flatten)]
         cargo: CargoArgs,
     },
+    /// Build once, then serve dist with the `[serve]` headers and index.html for SPA routes.
+    Serve {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        release: bool,
+        #[arg(short, long)]
+        jobs: Option<u32>,
+        #[arg(long, default_value = "/")]
+        public_url: String,
+        #[arg(short, long)]
+        verbose: bool,
+        /// Address to listen on; repeatable. Overrides `[serve] addresses`.
+        #[arg(long = "address")]
+        addresses: Vec<String>,
+        /// Overrides `[serve] port`; 8080 by default.
+        #[arg(long)]
+        port: Option<u16>,
+        #[command(flatten)]
+        cargo: CargoArgs,
+    },
     /// List the crates that ship styles, with their enabled features.
     Packages {
         #[command(flatten)]
@@ -139,20 +160,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             verbose,
             cargo,
         } => {
-            let path = config.unwrap_or_else(|| PathBuf::from(trug::config::FILE_NAME));
-            let (config, root) = if path.exists() {
-                let root = std::path::absolute(&path)?
-                    .parent()
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
-                (trug::config::Config::load(&path)?, root)
-            } else {
-                (trug::config::Config::default(), std::env::current_dir()?)
-            };
-            let mut public_url = public_url;
-            if !public_url.ends_with('/') {
-                public_url.push('/');
-            }
+            let (config, root) = load_config(config)?;
+            let public_url = normalize_url(public_url);
             let report = trug::build::build(&trug::build::BuildRequest {
                 config,
                 root,
@@ -163,6 +172,48 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 verbose,
             })?;
             eprintln!("trug: built {}", report.dist.display());
+        }
+        Command::Serve {
+            config,
+            release,
+            jobs,
+            public_url,
+            verbose,
+            addresses,
+            port,
+            cargo,
+        } => {
+            let (config, root) = load_config(config)?;
+            let serve = config.serve.clone();
+            let dist = config.paths(&root).dist;
+            let report = trug::build::build(&trug::build::BuildRequest {
+                config,
+                root,
+                query: cargo.into(),
+                release,
+                jobs,
+                public_url: normalize_url(public_url),
+                verbose,
+            })?;
+            eprintln!("trug: built {}", report.dist.display());
+            let addresses = if addresses.is_empty() {
+                serve.addresses.unwrap_or_else(|| vec!["127.0.0.1".into()])
+            } else {
+                addresses
+            };
+            let port = port.or(serve.port).unwrap_or(8080);
+            let site = trug::serve::Site::new(dist, &serve.headers)?;
+            tokio::runtime::Runtime::new()?.block_on(async {
+                let listeners = trug::serve::bind(&addresses, port).await?;
+                for listener in &listeners {
+                    eprintln!("trug: serving on http://{}", listener.local_addr()?);
+                }
+                tokio::select! {
+                    result = site.serve(listeners) => result?,
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
         }
         Command::Packages { cargo } => {
             for package in Query::from(cargo).packages()? {
@@ -178,4 +229,26 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn load_config(
+    config: Option<PathBuf>,
+) -> Result<(trug::config::Config, PathBuf), Box<dyn std::error::Error>> {
+    let path = config.unwrap_or_else(|| PathBuf::from(trug::config::FILE_NAME));
+    if path.exists() {
+        let root = std::path::absolute(&path)?
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        Ok((trug::config::Config::load(&path)?, root))
+    } else {
+        Ok((trug::config::Config::default(), std::env::current_dir()?))
+    }
+}
+
+fn normalize_url(mut public_url: String) -> String {
+    if !public_url.ends_with('/') {
+        public_url.push('/');
+    }
+    public_url
 }

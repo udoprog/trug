@@ -13,6 +13,8 @@ pub struct Config {
     #[serde(default)]
     pub build: Build,
     #[serde(default)]
+    pub serve: Serve,
+    #[serde(default)]
     pub hooks: Vec<Hook>,
 }
 
@@ -23,6 +25,17 @@ pub struct Build {
     pub target: Option<PathBuf>,
     /// The output directory, relative to `Trug.toml`; `dist` beside the target by default.
     pub dist: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Serve {
+    /// Addresses to listen on; `127.0.0.1` by default.
+    pub addresses: Option<Vec<String>>,
+    pub port: Option<u16>,
+    /// Headers added to every response.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -146,7 +159,7 @@ command = "true"
 
     #[test]
     fn rejects_unknown_keys_and_stages() {
-        assert!(Config::parse("[serve]\nport = 1").is_err());
+        assert!(Config::parse("[serve]\nspeed = 1").is_err());
         assert!(Config::parse("[build]\nminify = true").is_err());
         assert!(Config::parse("[[hooks]]\nstage = \"post_build\"\ncommand = \"x\"").is_err());
     }
