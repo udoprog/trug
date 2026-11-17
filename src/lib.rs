@@ -114,9 +114,10 @@
 //! | `<base data-trunk-public-url>` | `<base data-trug-public-url>` |
 //!
 //! The `rel` values trug supports are `rust` (at most one; `href` is the crate
-//! directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (`data-target-path`
-//! is optional and defaults to the directory's own name) and `icon`. Any other `rel` is an error. Styles and icons are
-//! written under content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
+//! directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir`
+//! (`data-target-path` is optional and defaults to the directory's own name) and
+//! `icon`. Any other `rel` is an error. Styles and icons are written under
+//! content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
 //! like `trug css` does and, like trunk, embed a source map with the sources in dev
 //! builds and none with `--release`.
 //!
