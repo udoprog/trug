@@ -441,23 +441,22 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
     let stdout = io::BufReader::new(child.stdout.take().expect("piped"));
     let wanted = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
     let mut wasm = None;
+    let mut found_cdylib = false;
     for message in Message::parse_stream(stdout).flatten() {
         let Message::CompilerArtifact(artifact) = message else {
             continue;
         };
         let same = std::fs::canonicalize(&artifact.manifest_path).is_ok_and(|path| path == wanted);
-        let cdylib = artifact
-            .target
-            .kind
-            .iter()
-            .any(|k| k.to_string() == "cdylib");
+        let kinds = |wanted: &str| artifact.target.kind.iter().any(|k| k.to_string() == wanted);
+        let is_cdylib = kinds("cdylib");
         if same
-            && cdylib
+            && (is_cdylib || (kinds("bin") && !found_cdylib))
             && let Some(file) = artifact
                 .filenames
                 .iter()
                 .find(|f| f.extension() == Some("wasm"))
         {
+            found_cdylib = is_cdylib;
             wasm = Some(file.clone().into_std_path_buf());
         }
     }
@@ -469,7 +468,7 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
     }
     wasm.ok_or_else(|| {
         Error::Cargo(format!(
-            "{} builds no cdylib; add crate-type = [\"cdylib\"] to its [lib]",
+            "{} builds no wasm cdylib or bin; add crate-type = [\"cdylib\"] to its [lib]",
             manifest.display()
         ))
     })
