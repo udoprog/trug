@@ -14,10 +14,14 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use tokio::net::TcpListener;
 
+use crate::config;
+use crate::proxy::Proxy;
+
 #[derive(Debug)]
 pub enum Error {
     Header(String),
     Address(String),
+    Proxy(crate::proxy::Error),
     Bind(SocketAddr, std::io::Error),
     Io(std::io::Error),
 }
@@ -27,6 +31,7 @@ impl fmt::Display for Error {
         match self {
             Error::Header(name) => write!(f, "invalid header `{name}`"),
             Error::Address(address) => write!(f, "invalid address `{address}`"),
+            Error::Proxy(error) => error.fmt(f),
             Error::Bind(addr, error) => write!(f, "cannot bind {addr}: {error}"),
             Error::Io(error) => error.fmt(f),
         }
@@ -45,6 +50,7 @@ pub struct Site {
 struct Inner {
     dist: RwLock<PathBuf>,
     headers: HeaderMap,
+    proxies: Vec<Proxy>,
 }
 
 impl Site {
@@ -61,8 +67,22 @@ impl Site {
             inner: Arc::new(Inner {
                 dist: RwLock::new(dist),
                 headers: map,
+                proxies: Vec::new(),
             }),
         })
+    }
+
+    /// Must be called before the site is cloned.
+    pub fn with_proxies(mut self, proxies: &[config::Proxy]) -> Result<Self, Error> {
+        let proxies = proxies
+            .iter()
+            .map(Proxy::new)
+            .collect::<Result<_, _>>()
+            .map_err(Error::Proxy)?;
+        Arc::get_mut(&mut self.inner)
+            .expect("site not yet shared")
+            .proxies = proxies;
+        Ok(self)
     }
 
     pub fn set_dist(&self, dist: PathBuf) {
@@ -170,6 +190,14 @@ async fn read_file(path: &Path) -> Option<Vec<u8>> {
 }
 
 async fn handle(State(site): State<Site>, request: Request) -> Response {
+    if let Some(proxy) = site
+        .inner
+        .proxies
+        .iter()
+        .find(|p| p.matches(request.uri().path()))
+    {
+        return proxy.forward(request).await;
+    }
     let head = match *request.method() {
         Method::GET => false,
         Method::HEAD => true,

@@ -18,6 +18,8 @@ pub struct Config {
     pub watch: Watch,
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    #[serde(default)]
+    pub proxy: Vec<Proxy>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -50,6 +52,18 @@ pub struct Watch {
     pub ignore: Vec<String>,
     /// Quiet time before a rebuild starts, in milliseconds; 200 by default.
     pub debounce_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proxy {
+    /// Backend URL; its path is the mount prefix unless `rewrite` is set.
+    pub backend: String,
+    /// Path prefix served by trug that is replaced by the backend's path.
+    pub rewrite: Option<String>,
+    /// Hand backend redirects to the client instead of following them.
+    #[serde(default)]
+    pub no_redirect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]

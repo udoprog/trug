@@ -189,6 +189,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let (config, root) = load_config(config)?;
             let serve = config.serve.clone();
+            let proxies = config.proxy.clone();
             let dist = config.paths(&root).dist;
             let request = trug::build::BuildRequest {
                 config,
@@ -207,7 +208,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 addresses
             };
             let port = port.or(serve.port).unwrap_or(8080);
-            let site = trug::serve::Site::new(dist, &serve.headers)?;
+            let site = trug::serve::Site::new(dist, &serve.headers)?.with_proxies(&proxies)?;
             let _watcher = if no_watch {
                 None
             } else {

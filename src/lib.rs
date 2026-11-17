@@ -11,6 +11,7 @@ pub mod dist;
 pub mod html;
 pub mod importer;
 pub mod packages;
+pub mod proxy;
 pub mod serve;
 pub mod watch;
 
