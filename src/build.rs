@@ -143,7 +143,10 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
 
     let wasm = timer.step("cargo", || cargo_build(&query, request))?;
     let metadata = query.metadata()?;
-    let bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
+    let mut bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
+    if request.release && request.config.build.wasm_opt != Some(false) {
+        timer.step("wasm-opt", || bindgen.optimize())?;
+    }
 
     timer.step("output", || {
         let assets = bindgen.stage(staging.path())?;
@@ -488,9 +491,62 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
 struct Bindgen {
     dir: PathBuf,
     name: String,
+    /// The wasm file in `dir` to stage.
+    wasm: String,
 }
 
+/// Features current wasm-bindgen output uses, which wasm-opt rejects unless enabled.
+const WASM_OPT_FEATURES: &[&str] = &[
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-multivalue",
+];
+
 impl Bindgen {
+    fn new(dir: PathBuf, name: String) -> Self {
+        let wasm = format!("{name}_bg.wasm");
+        Bindgen { dir, name, wasm }
+    }
+
+    /// Runs `wasm-opt -Oz` from PATH into a file cached beside the bindgen output.
+    fn optimize(&mut self) -> Result<(), Error> {
+        let optimized = format!("{}_bg.opt.wasm", self.name);
+        let out = self.dir.join(&optimized);
+        if !out.exists() {
+            let found = Command::new("wasm-opt")
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !found {
+                eprintln!("trug: wasm-opt not found on PATH; release wasm is not optimized");
+                return Ok(());
+            }
+            let tmp = out.with_extension(format!("tmp{}", std::process::id()));
+            let status = Command::new("wasm-opt")
+                .arg("-Oz")
+                .args(WASM_OPT_FEATURES)
+                .arg(self.dir.join(&self.wasm))
+                .arg("-o")
+                .arg(&tmp)
+                .stdin(Stdio::null())
+                .status()
+                .map_err(|e| Error::Bindgen(format!("wasm-opt: {e}")))?;
+            if !status.success() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(Error::Bindgen(format!("wasm-opt failed: {status}")));
+            }
+            std::fs::rename(&tmp, &out).map_err(|e| Error::Io(out.clone(), e))?;
+        }
+        self.wasm = optimized;
+        Ok(())
+    }
+
     fn stage(&self, staging: &Path) -> Result<Assets, Error> {
         let copy = |file: String, stem: &str, ext: &str| -> Result<String, Error> {
             let from = self.dir.join(&file);
@@ -506,11 +562,7 @@ impl Bindgen {
         }
         Ok(Assets {
             js: copy(format!("{}.js", self.name), &self.name, "js")?,
-            wasm: copy(
-                format!("{}_bg.wasm", self.name),
-                &format!("{}_bg", self.name),
-                "wasm",
-            )?,
+            wasm: copy(self.wasm.clone(), &format!("{}_bg", self.name), "wasm")?,
         })
     }
 }
@@ -537,7 +589,7 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
         .join("trug/bindgen")
         .join(&key[..16]);
     if dir.join(format!("{name}.js")).exists() && dir.join(format!("{name}_bg.wasm")).exists() {
-        return Ok(Bindgen { dir, name });
+        return Ok(Bindgen::new(dir, name));
     }
     let binary = find_bindgen(&version)?;
     let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
@@ -563,7 +615,7 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::rename(&tmp, &dir).map_err(|e| Error::Io(dir.clone(), e))?;
-    Ok(Bindgen { dir, name })
+    Ok(Bindgen::new(dir, name))
 }
 
 /// Where trug keeps tools it installs: `$TRUG_CACHE_DIR`, else `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`.
@@ -752,6 +804,19 @@ mod tests {
             "<head><meta charset=\"utf-8\"><link rel=\"modulepreload\" href=\"/base/app-1.js\""
         ));
         assert!(out.ends_with("</script></head><body></body>"));
+    }
+
+    #[test]
+    fn wasm_opt_output_is_staged_when_found() {
+        let tmp = std::env::temp_dir().join(format!("trug-wasm-opt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        let mut bindgen = Bindgen::new(tmp.clone(), "app".into());
+        bindgen.optimize().unwrap();
+        let found = tmp.join("app_bg.opt.wasm").exists();
+        assert_eq!(bindgen.wasm == "app_bg.opt.wasm", found);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

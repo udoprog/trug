@@ -101,6 +101,9 @@
 //! `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`), else it is `cargo install`ed there
 //! once. Nothing is downloaded from GitHub.
 //!
+//! `--release` builds run `wasm-opt -Oz` on the wasm when `wasm-opt` is on `PATH`
+//! (it is never installed; without it trug warns and stages the wasm unoptimized).
+//!
 //! <br>
 //!
 //! ### Moving from trunk
@@ -139,6 +142,7 @@
 //! [build]
 //! target = "index.html"   # default
 //! dist = "dist"           # default: beside target
+//! wasm_opt = true         # default; false skips wasm-opt on --release builds
 //!
 //! [[hooks]]               # run in order before the build
 //! stage = "pre_build"

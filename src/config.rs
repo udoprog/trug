@@ -29,6 +29,8 @@ pub struct Build {
     pub target: Option<PathBuf>,
     /// The output directory, relative to `Trug.toml`; `dist` beside the target by default.
     pub dist: Option<PathBuf>,
+    /// Run `wasm-opt -Oz` on `--release` builds; true by default.
+    pub wasm_opt: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -186,6 +188,14 @@ command = "true"
             config.paths(Path::new("/app")).dist,
             Path::new("/app/w/dist")
         );
+    }
+
+    #[test]
+    fn parses_wasm_opt() {
+        assert_eq!(Config::default().build.wasm_opt, None);
+        let config = Config::parse("[build]\nwasm_opt = false").unwrap();
+        assert_eq!(config.build.wasm_opt, Some(false));
+        assert!(Config::parse("[build]\nwasm_opt = \"no\"").is_err());
     }
 
     #[test]
