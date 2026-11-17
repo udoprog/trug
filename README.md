@@ -160,14 +160,15 @@ no_redirect = false     # hand backend redirects to the client
 ### Commands
 
 ```shell
-trug build [-c Trug.toml] [--release] [-j N] [--public-url /app/] [-v]
+trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/] [-v]
 trug serve [--no-watch] [--address ADDR]... [--port N] [build flags]
 ```
 
 `trug build` takes the app's cargo flags (`--manifest-path`, `--target`, `-F`,
 `--all-features`, `--no-default-features`, `--locked`, `--offline`); `-v` prints
 each step's time. `--public-url` overrides the `<base data-trug-public-url>` href
-and defaults to `/`.
+and defaults to `/`. `-d`/`--dist DIR` overrides `[build] dist` with a path
+relative to the current directory; it is still replaced only on success.
 
 <br>
 

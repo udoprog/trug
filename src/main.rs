@@ -37,6 +37,9 @@ enum Command {
         /// without one the defaults (`index.html`, `dist` beside it).
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// The output directory, relative to the current directory; overrides `[build] dist`.
+        #[arg(short, long)]
+        dist: Option<PathBuf>,
         #[arg(long)]
         release: bool,
         /// Passed to cargo as `--jobs`.
@@ -59,6 +62,8 @@ enum Command {
         no_watch: bool,
         #[arg(short, long)]
         config: Option<PathBuf>,
+        #[arg(short, long)]
+        dist: Option<PathBuf>,
         #[arg(long)]
         release: bool,
         #[arg(short, long)]
@@ -158,13 +163,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Build {
             config,
+            dist,
             release,
             jobs,
             public_url,
             verbose,
             cargo,
         } => {
-            let (config, root) = load_config(config)?;
+            let (config, root) = load_config(config, dist)?;
             let report = trug::build::build(&trug::build::BuildRequest {
                 config,
                 root,
@@ -178,6 +184,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Serve {
             config,
+            dist,
             release,
             jobs,
             public_url,
@@ -187,7 +194,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             no_watch,
             cargo,
         } => {
-            let (config, root) = load_config(config)?;
+            let (config, root) = load_config(config, dist)?;
             let serve = config.serve.clone();
             let proxies = config.proxy.clone();
             let dist = config.paths(&root).dist;
@@ -249,17 +256,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn load_config(
     config: Option<PathBuf>,
+    dist: Option<PathBuf>,
 ) -> Result<(trug::config::Config, PathBuf), Box<dyn std::error::Error>> {
     let path = config.unwrap_or_else(|| PathBuf::from(trug::config::FILE_NAME));
-    if path.exists() {
+    let (mut config, root) = if path.exists() {
         let root = std::path::absolute(&path)?
             .parent()
             .map(PathBuf::from)
             .unwrap_or_default();
-        Ok((trug::config::Config::load(&path)?, root))
+        (trug::config::Config::load(&path)?, root)
     } else {
-        Ok((trug::config::Config::default(), std::env::current_dir()?))
+        (trug::config::Config::default(), std::env::current_dir()?)
+    };
+    if let Some(dist) = dist {
+        config.build.dist = Some(std::path::absolute(dist)?);
     }
+    Ok((config, root))
 }
 
 fn start_watch(
