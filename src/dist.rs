@@ -9,16 +9,24 @@ pub struct Staging {
     done: bool,
 }
 
-fn sibling(dist: &Path, kind: &str) -> PathBuf {
+/// The name prefix of every temporary directory made beside `dist`.
+pub fn sibling_prefix(dist: &Path) -> String {
     let name = dist.file_name().unwrap_or_default().to_string_lossy();
-    dist.with_file_name(format!(".{name}.trug-{kind}-{}", std::process::id()))
+    format!(".{name}.trug-")
+}
+
+fn sibling(dist: &Path, kind: &str) -> PathBuf {
+    dist.with_file_name(format!(
+        "{}{kind}-{}",
+        sibling_prefix(dist),
+        std::process::id()
+    ))
 }
 
 impl Staging {
     /// Removes staging directories left by earlier runs and makes a fresh one.
     pub fn create(dist: &Path) -> io::Result<Self> {
-        let name = dist.file_name().unwrap_or_default().to_string_lossy();
-        let prefix = format!(".{name}.trug-");
+        let prefix = sibling_prefix(dist);
         let parent = dist.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         for entry in std::fs::read_dir(parent)? {

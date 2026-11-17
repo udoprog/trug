@@ -12,6 +12,7 @@ pub mod html;
 pub mod importer;
 pub mod packages;
 pub mod serve;
+pub mod watch;
 
 use std::fmt;
 use std::io;

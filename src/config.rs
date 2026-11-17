@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub serve: Serve,
     #[serde(default)]
+    pub watch: Watch,
+    #[serde(default)]
     pub hooks: Vec<Hook>,
 }
 
@@ -36,6 +38,18 @@ pub struct Serve {
     /// Headers added to every response.
     #[serde(default)]
     pub headers: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Watch {
+    /// Paths to watch, relative to `Trug.toml`; its directory by default.
+    pub watch: Option<Vec<PathBuf>>,
+    /// Glob patterns, relative to `Trug.toml`, of paths whose changes are ignored.
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// Quiet time before a rebuild starts, in milliseconds; 200 by default.
+    pub debounce_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]

@@ -52,8 +52,11 @@ enum Command {
         #[command(flatten)]
         cargo: CargoArgs,
     },
-    /// Build once, then serve dist with the `[serve]` headers and index.html for SPA routes.
+    /// Build, serve dist with the `[serve]` headers and index.html for SPA routes, and rebuild on changes.
     Serve {
+        /// Serve the first build without rebuilding when sources change.
+        #[arg(long)]
+        no_watch: bool,
         #[arg(short, long)]
         config: Option<PathBuf>,
         #[arg(long)]
@@ -181,12 +184,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             verbose,
             addresses,
             port,
+            no_watch,
             cargo,
         } => {
             let (config, root) = load_config(config)?;
             let serve = config.serve.clone();
             let dist = config.paths(&root).dist;
-            let report = trug::build::build(&trug::build::BuildRequest {
+            let request = trug::build::BuildRequest {
                 config,
                 root,
                 query: cargo.into(),
@@ -194,7 +198,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 jobs,
                 public_url,
                 verbose,
-            })?;
+            };
+            let report = trug::build::build(&request)?;
             eprintln!("trug: built {}", report.dist.display());
             let addresses = if addresses.is_empty() {
                 serve.addresses.unwrap_or_else(|| vec!["127.0.0.1".into()])
@@ -203,6 +208,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             let port = port.or(serve.port).unwrap_or(8080);
             let site = trug::serve::Site::new(dist, &serve.headers)?;
+            let _watcher = if no_watch {
+                None
+            } else {
+                Some(start_watch(request)?)
+            };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listeners = trug::serve::bind(&addresses, port).await?;
                 for listener in &listeners {
@@ -244,4 +254,49 @@ fn load_config(
     } else {
         Ok((trug::config::Config::default(), std::env::current_dir()?))
     }
+}
+
+fn start_watch(
+    request: trug::build::BuildRequest,
+) -> Result<trug::watch::Watcher, Box<dyn std::error::Error>> {
+    let root = request.root.clone();
+    let settings = request.config.watch.clone();
+    let paths = request.config.paths(&root);
+    let mut watch: Vec<PathBuf> = match &settings.watch {
+        Some(list) => list.iter().map(|p| root.join(p)).collect(),
+        None => vec![root.clone()],
+    };
+    let mut ignored = vec![paths.dist.clone(), root.join("target"), root.join(".git")];
+    match request.query.metadata().and_then(|metadata| {
+        let target = metadata.target_directory.clone().into_std_path_buf();
+        trug::packages::style_packages(&metadata).map(|packages| (packages, target))
+    }) {
+        Ok((packages, target)) => {
+            watch.extend(packages.into_iter().map(|p| p.dir));
+            ignored.push(target);
+        }
+        Err(error) => eprintln!("trug: not watching package styles: {error}"),
+    }
+    watch.retain(|path| path.exists());
+    watch.sort();
+    watch.dedup();
+    let ignore = trug::watch::Ignore::new(&root, &settings.ignore, ignored, Some(&paths.dist))?;
+    let debounce = settings.debounce_ms.map_or(
+        trug::watch::DEFAULT_DEBOUNCE,
+        std::time::Duration::from_millis,
+    );
+    let watcher = trug::watch::Watcher::start(
+        trug::watch::WatchRequest {
+            paths: watch,
+            ignore,
+            debounce,
+        },
+        move || {
+            eprintln!("trug: change detected, rebuilding");
+            trug::build::build(&request)
+                .map(|report| eprintln!("trug: built {}", report.dist.display()))
+        },
+        || {},
+    )?;
+    Ok(watcher)
 }
