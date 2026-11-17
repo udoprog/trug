@@ -1,0 +1,8 @@
+[package]
+name = "dup"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dep-a = { path = "../dep-a" }
+dep-a-old = { package = "dep-a", path = "../dup-a2" }

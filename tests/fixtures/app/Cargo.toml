@@ -1,0 +1,13 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+extra = ["dep-a/extra"]
+
+[dependencies]
+dep-a = { path = "../dep-a", default-features = false, features = ["base"] }
+custom_b = { path = "../custom_b" }
+plain = { path = "../plain" }

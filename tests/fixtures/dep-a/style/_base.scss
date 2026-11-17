@@ -1,0 +1,5 @@
+@use "pkg:dep-a/features" as f;
+.a-base { color: red; }
+@if f.enabled("extra") {
+  .a-extra { color: blue; }
+}

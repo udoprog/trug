@@ -1,0 +1,3 @@
+@use "pkg:custom-b/features" as f;
+.b-main::after { content: "#{f.$name} #{f.$version}"; }
+@if f.enabled("anything") { .b-never { color: red; } }

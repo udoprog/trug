@@ -1,0 +1,5 @@
+@use "sass:map";
+@use "pkg:dep-a/features" as f;
+@if map.has-key(f.$features, "extra") {
+  .a-extra-partial { color: green; }
+}

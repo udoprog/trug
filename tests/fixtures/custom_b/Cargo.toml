@@ -1,0 +1,8 @@
+[package]
+name = "custom_b"
+version = "0.3.0"
+edition = "2024"
+
+[package.metadata.trug]
+dir = "css"
+entry = "main.scss"

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use trug::{OutputStyle, Query};
+use trug::{CssRequest, OutputStyle, Query};
 
 #[derive(Parser)]
 #[command(
@@ -96,12 +96,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             style,
             cargo,
         } => {
-            let packages = Query::from(cargo).packages()?;
             let style = match style {
                 Style::Expanded => OutputStyle::Expanded,
                 Style::Compressed => OutputStyle::Compressed,
             };
-            let css = trug::compile(&entry, packages, load_paths, style)?;
+            let css = trug::build_css(&CssRequest {
+                query: cargo.into(),
+                entry,
+                load_paths,
+                style,
+            })?;
             match out {
                 Some(out) => trug::write_atomic(&out, &css)?,
                 None => print!("{css}"),

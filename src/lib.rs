@@ -41,6 +41,39 @@ impl From<packages::Error> for Error {
     }
 }
 
+/// Everything the CSS step needs: the cargo flags the app is built with, the
+/// app's stylesheet, extra load paths and the output style.
+#[derive(Clone, Debug)]
+pub struct CssRequest {
+    pub query: Query,
+    pub entry: PathBuf,
+    pub load_paths: Vec<PathBuf>,
+    pub style: OutputStyle,
+}
+
+impl CssRequest {
+    pub fn new(entry: impl Into<PathBuf>) -> Self {
+        Self {
+            query: Query::default(),
+            entry: entry.into(),
+            load_paths: Vec::new(),
+            style: OutputStyle::Expanded,
+        }
+    }
+}
+
+/// Discovers the packages that ship styles and compiles the request's
+/// stylesheet with them available as `pkg:` URLs.
+pub fn build_css(request: &CssRequest) -> Result<String, Error> {
+    let packages = request.query.packages()?;
+    compile(
+        &request.entry,
+        packages,
+        request.load_paths.clone(),
+        request.style,
+    )
+}
+
 /// Compiles the stylesheet at `entry` with `packages` available as `pkg:` URLs.
 pub fn compile(
     entry: &Path,

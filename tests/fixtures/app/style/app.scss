@@ -1,0 +1,3 @@
+@use "pkg:dep-a" as *;
+@use "pkg:custom-b" as *;
+.app { color: black; }
