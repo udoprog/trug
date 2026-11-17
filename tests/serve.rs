@@ -143,7 +143,9 @@ mod proxy {
 
     fn start(proxies: &[Proxy]) -> SocketAddr {
         let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
-        let dir = std::env::temp_dir().join(format!("trug-proxy-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("trug-proxy-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), "<p>index</p>").unwrap();
         let site = Site::new(dir, &Default::default())
