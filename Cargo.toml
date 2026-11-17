@@ -13,6 +13,7 @@ categories = ["development-tools", "wasm"]
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
+base64 = "0.22.1"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.8", features = ["derive"] }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }

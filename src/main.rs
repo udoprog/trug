@@ -28,6 +28,9 @@ enum Command {
         load_paths: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = Style::Expanded)]
         style: Style,
+        /// Append an inline source map with the sources embedded.
+        #[arg(long)]
+        embed_source_map: bool,
         #[command(flatten)]
         cargo: CargoArgs,
     },
@@ -144,6 +147,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             out,
             load_paths,
             style,
+            embed_source_map,
             cargo,
         } => {
             let style = match style {
@@ -155,6 +159,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 entry,
                 load_paths,
                 style,
+                source_map: embed_source_map,
             })?;
             match out {
                 Some(out) => trug::write_atomic(&out, &css)?,

@@ -81,7 +81,8 @@
 //! Both take the app's cargo flags: `--manifest-path`, `--target` (default
 //! `wasm32-unknown-unknown`), `-F/--features`, `--all-features`,
 //! `--no-default-features`, `--locked`, `--offline`. `css` also takes `-I`,
-//! `--style` and `-o` (written atomically, so a failed build keeps the old file).
+//! `--style`, `-o` (written atomically, so a failed build keeps the old file) and
+//! `--embed-source-map`, which appends an inline source map with the sources in it.
 //!
 //! From Rust, `trug::build_css(&CssRequest)` does the same in-process.
 //!
@@ -116,7 +117,8 @@
 //! directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (with
 //! `data-target-path`) and `icon`. Any other `rel` is an error. Styles and icons are
 //! written under content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
-//! like `trug css` does.
+//! like `trug css` does and, like trunk, embed a source map with the sources in dev
+//! builds and none with `--release`.
 //!
 //! <br>
 //!
@@ -255,6 +257,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+
 pub use importer::PackageImporter;
 pub use packages::{Query, StylePackage};
 pub use sasso::OutputStyle;
@@ -292,6 +296,8 @@ pub struct CssRequest {
     pub entry: PathBuf,
     pub load_paths: Vec<PathBuf>,
     pub style: OutputStyle,
+    /// Append an inline source map, with the sources embedded.
+    pub source_map: bool,
 }
 
 impl CssRequest {
@@ -301,6 +307,7 @@ impl CssRequest {
             entry: entry.into(),
             load_paths: Vec::new(),
             style: OutputStyle::Expanded,
+            source_map: false,
         }
     }
 }
@@ -314,6 +321,7 @@ pub fn build_css(request: &CssRequest) -> Result<String, Error> {
         packages,
         request.load_paths.clone(),
         request.style,
+        request.source_map,
     )
 }
 
@@ -323,6 +331,7 @@ pub fn compile(
     packages: Vec<StylePackage>,
     load_paths: Vec<PathBuf>,
     style: OutputStyle,
+    source_map: bool,
 ) -> Result<String, Error> {
     let entry = std::path::absolute(entry).map_err(|e| Error::Io(entry.to_owned(), e))?;
     let source = std::fs::read_to_string(&entry).map_err(|e| Error::Io(entry.clone(), e))?;
@@ -332,7 +341,20 @@ pub fn compile(
         .with_importer(&importer)
         .with_url(&url)
         .with_style(style);
-    sasso::compile(&source, &options).map_err(Error::Sass)
+    if !source_map {
+        return sasso::compile(&source, &options).map_err(Error::Sass);
+    }
+    let options = options.with_source_map_include_sources(true);
+    let result = sasso::compile_with_source_map(&source, &options).map_err(Error::Sass)?;
+    let map = base64::engine::general_purpose::STANDARD.encode(result.source_map.to_json());
+    let mut css = result.css;
+    if !css.is_empty() && !css.ends_with('\n') {
+        css.push('\n');
+    }
+    css.push_str(&format!(
+        "/*# sourceMappingURL=data:application/json;charset=utf-8;base64,{map} */\n"
+    ));
+    Ok(css)
 }
 
 /// Writes `contents` to `path` through a temporary file beside it, so a reader

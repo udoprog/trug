@@ -197,3 +197,16 @@ fn gate_with_unknown_feature() {
         "{error}"
     );
 }
+
+#[test]
+fn source_map_is_embedded_on_request() {
+    let mut req = request("@use \"pkg:dep-a\" as x;", "map");
+    assert!(!trug::build_css(&req).unwrap().contains("sourceMappingURL"));
+    req.source_map = true;
+    let css = trug::build_css(&req).unwrap();
+    assert!(css.contains(".a-base"), "{css}");
+    assert!(
+        css.contains("/*# sourceMappingURL=data:application/json;charset=utf-8;base64,"),
+        "{css}"
+    );
+}

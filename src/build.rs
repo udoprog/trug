@@ -132,7 +132,13 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     query.target = Some(WASM_TARGET.to_owned());
 
     let links = timer.step("styles", || {
-        stage_styles(&plan.styles, &query, staging.path(), &public_url)
+        stage_styles(
+            &plan.styles,
+            &query,
+            staging.path(),
+            &public_url,
+            !request.release,
+        )
     })?;
 
     let wasm = timer.step("cargo", || cargo_build(&query, request))?;
@@ -356,12 +362,14 @@ fn stage_styles(
     query: &Query,
     staging: &Path,
     public_url: &str,
+    source_map: bool,
 ) -> Result<HashMap<usize, String>, Error> {
     let mut links = HashMap::new();
     for style in styles {
         let contents = if style.scss {
             let mut css = crate::CssRequest::new(&style.path);
             css.query = query.clone();
+            css.source_map = source_map;
             crate::build_css(&css)
                 .map_err(|e| Error::Css(format!("{}: {e}", style.path.display())))?
         } else {
@@ -830,7 +838,7 @@ mod tests {
             offline: true,
             ..Query::default()
         };
-        let links = stage_styles(&plan.styles, &query, &staging, "/pub/").unwrap();
+        let links = stage_styles(&plan.styles, &query, &staging, "/pub/", false).unwrap();
         let out = render(html, &directives, &plan, &assets(), &links, "/pub/", vec![]);
         let mut files: Vec<_> = std::fs::read_dir(&staging)
             .unwrap()

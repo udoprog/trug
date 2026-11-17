@@ -85,7 +85,8 @@ trug packages
 Both take the app's cargo flags: `--manifest-path`, `--target` (default
 `wasm32-unknown-unknown`), `-F/--features`, `--all-features`,
 `--no-default-features`, `--locked`, `--offline`. `css` also takes `-I`,
-`--style` and `-o` (written atomically, so a failed build keeps the old file).
+`--style`, `-o` (written atomically, so a failed build keeps the old file) and
+`--embed-source-map`, which appends an inline source map with the sources in it.
 
 From Rust, `trug::build_css(&CssRequest)` does the same in-process.
 
@@ -120,7 +121,8 @@ The `rel` values trug supports are `rust` (at most one; `href` is the crate
 directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (with
 `data-target-path`) and `icon`. Any other `rel` is an error. Styles and icons are
 written under content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
-like `trug css` does.
+like `trug css` does and, like trunk, embed a source map with the sources in dev
+builds and none with `--release`.
 
 <br>
 
