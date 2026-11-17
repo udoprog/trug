@@ -216,3 +216,56 @@ mod proxy {
         assert!(get(addr, "/api/x").starts_with("HTTP/1.1 502"));
     }
 }
+
+#[test]
+fn reload_events_follow_notify_and_inject_script() {
+    let dir = dist("reload");
+    let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+    let site = Site::new(dir.clone(), &BTreeMap::new())
+        .unwrap()
+        .with_reload();
+    let listeners = rt.block_on(bind(&["127.0.0.1".to_string()], 0)).unwrap();
+    let addr = listeners[0].local_addr().unwrap();
+    let serving = site.clone();
+    rt.spawn(async move { serving.serve(listeners).await });
+
+    let page = request(addr, "GET", "/");
+    assert!(page.contains("/_trug/reload"), "{page}");
+    assert!(
+        !std::fs::read_to_string(dir.join("index.html"))
+            .unwrap()
+            .contains("_trug")
+    );
+    assert!(request(addr, "GET", "/_trug/other").starts_with("HTTP/1.1 404"));
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    write!(stream, "GET /_trug/reload HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .unwrap();
+    let mut seen = String::new();
+    let mut buf = [0u8; 1024];
+    let mut read = |seen: &mut String| {
+        if let Ok(n) = stream.read(&mut buf) {
+            seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    };
+    while !seen.contains(": connected") {
+        read(&mut seen);
+    }
+    assert!(seen.contains("text/event-stream"), "{seen}");
+    read(&mut seen);
+    assert!(!seen.contains("data: reload"), "{seen}");
+    site.notify_reload();
+    while !seen.contains("data: reload") {
+        read(&mut seen);
+    }
+}
+
+#[test]
+fn plain_site_has_no_reload() {
+    let dir = dist("noreload");
+    let (addr, _site) = start(&dir);
+    assert!(request(addr, "GET", "/_trug/reload").starts_with("HTTP/1.1 404"));
+    assert!(request(addr, "GET", "/").ends_with("<p>index</p>"));
+}

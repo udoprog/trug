@@ -125,6 +125,7 @@ fn build_swap_and_failures() {
     let first = listing(&dist);
     assert_eq!(first.len(), 3, "{first:?}");
     let index = std::fs::read_to_string(dist.join("index.html")).unwrap();
+    assert!(!index.contains("_trug/reload"));
     assert!(index.starts_with("<!DOCTYPE html>\r\n<html>\r\n<head>\r\n  <meta charset=\"utf-8\">\r\n  <title>Fixture</title>\r\n  "));
     assert!(index.ends_with("\r\n</head>\r\n<body>\r\n</body>\r\n</html>\r\n"));
     assert!(!index.contains("data-trug"));

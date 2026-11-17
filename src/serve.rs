@@ -5,17 +5,26 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Request, State};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
+use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 use crate::config;
 use crate::proxy::Proxy;
+
+/// Reserved by trug; handled before proxies and files.
+pub const RELOAD_PATH: &str = "/_trug/reload";
+
+const RELOAD_SCRIPT: &str =
+    "<script>new EventSource(\"/_trug/reload\").onmessage=()=>location.reload();</script>";
 
 #[derive(Debug)]
 pub enum Error {
@@ -51,6 +60,7 @@ struct Inner {
     dist: RwLock<PathBuf>,
     headers: HeaderMap,
     proxies: Vec<Proxy>,
+    reload: Option<broadcast::Sender<()>>,
 }
 
 impl Site {
@@ -68,6 +78,7 @@ impl Site {
                 dist: RwLock::new(dist),
                 headers: map,
                 proxies: Vec::new(),
+                reload: None,
             }),
         })
     }
@@ -83,6 +94,22 @@ impl Site {
             .expect("site not yet shared")
             .proxies = proxies;
         Ok(self)
+    }
+
+    /// Serves `RELOAD_PATH` and injects the reload script into index pages.
+    /// Must be called before the site is cloned.
+    pub fn with_reload(mut self) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("site not yet shared")
+            .reload = Some(broadcast::channel(16).0);
+        self
+    }
+
+    /// Tells connected pages to reload; call after a successful swap.
+    pub fn notify_reload(&self) {
+        if let Some(tx) = &self.inner.reload {
+            let _ = tx.send(());
+        }
     }
 
     pub fn set_dist(&self, dist: PathBuf) {
@@ -189,7 +216,51 @@ async fn read_file(path: &Path) -> Option<Vec<u8>> {
     tokio::fs::read(path).await.ok()
 }
 
+fn reload_events(tx: &broadcast::Sender<()>) -> Body {
+    let rx = tx.subscribe();
+    let first = futures_util::stream::once(async {
+        Ok::<_, std::convert::Infallible>(Bytes::from_static(b": connected\n\n"))
+    });
+    let events = futures_util::stream::unfold(rx, |mut rx| async move {
+        let message = match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+            Err(_) => &b": keep-alive\n\n"[..],
+            Ok(Ok(())) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                &b"data: reload\n\n"[..]
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => return None,
+        };
+        Some((Ok(Bytes::from_static(message)), rx))
+    });
+    Body::from_stream(futures_util::StreamExt::chain(first, events))
+}
+
+fn inject_script(html: Vec<u8>) -> Vec<u8> {
+    let script = RELOAD_SCRIPT.as_bytes();
+    let at = html
+        .windows(7)
+        .rposition(|w| w.eq_ignore_ascii_case(b"</body>"))
+        .unwrap_or(html.len());
+    let mut out = Vec::with_capacity(html.len() + script.len());
+    out.extend_from_slice(&html[..at]);
+    out.extend_from_slice(script);
+    out.extend_from_slice(&html[at..]);
+    out
+}
+
 async fn handle(State(site): State<Site>, request: Request) -> Response {
+    let path = request.uri().path();
+    if path == RELOAD_PATH || path.starts_with("/_trug/") {
+        return match (&site.inner.reload, path == RELOAD_PATH) {
+            (Some(tx), true) => {
+                let mut response = response(StatusCode::OK, &site, reload_events(tx));
+                let headers = response.headers_mut();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+                headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                response
+            }
+            _ => response(StatusCode::NOT_FOUND, &site, Body::from("not found")),
+        };
+    }
     if let Some(proxy) = site
         .inner
         .proxies
@@ -219,6 +290,11 @@ async fn handle(State(site): State<Site>, request: Request) -> Response {
     let Some((path, data)) = found else {
         return response(StatusCode::NOT_FOUND, &site, Body::from("not found"));
     };
+    let data = if site.inner.reload.is_some() && content_type(&path).starts_with("text/html") {
+        inject_script(data)
+    } else {
+        data
+    };
     let len = data.len();
     let body = if head {
         Body::empty()
@@ -244,5 +320,12 @@ mod tests {
         assert_eq!(relative("/../x"), None);
         assert_eq!(relative("/%2e%2e/x"), None);
         assert_eq!(relative("/a%2Fb"), Some(PathBuf::from("a/b")));
+    }
+
+    #[test]
+    fn injects_before_body_end() {
+        let out = inject_script(b"<body>x</BODY>".to_vec());
+        assert_eq!(out, format!("<body>x{RELOAD_SCRIPT}</BODY>").into_bytes());
+        assert!(inject_script(b"<p>".to_vec()).ends_with(RELOAD_SCRIPT.as_bytes()));
     }
 }

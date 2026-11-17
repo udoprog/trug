@@ -7,6 +7,7 @@ edition = "2024"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.8", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false }
 globset = "0.4.16"
 libc = "0.2.191"
 notify = "8.2.0"
@@ -15,5 +16,5 @@ sasso = "=0.21.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "fs", "macros", "signal"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "fs", "macros", "signal", "sync", "time"] }
 toml = "1.2.1"

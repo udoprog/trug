@@ -1322,6 +1322,7 @@ dependencies = [
  "axum",
  "cargo_metadata",
  "clap",
+ "futures-util",
  "globset",
  "libc",
  "notify",

@@ -208,11 +208,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 addresses
             };
             let port = port.or(serve.port).unwrap_or(8080);
-            let site = trug::serve::Site::new(dist, &serve.headers)?.with_proxies(&proxies)?;
+            let mut site = trug::serve::Site::new(dist, &serve.headers)?.with_proxies(&proxies)?;
+            if !no_watch {
+                site = site.with_reload();
+            }
             let _watcher = if no_watch {
                 None
             } else {
-                Some(start_watch(request)?)
+                Some(start_watch(request, site.clone())?)
             };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listeners = trug::serve::bind(&addresses, port).await?;
@@ -259,6 +262,7 @@ fn load_config(
 
 fn start_watch(
     request: trug::build::BuildRequest,
+    site: trug::serve::Site,
 ) -> Result<trug::watch::Watcher, Box<dyn std::error::Error>> {
     let root = request.root.clone();
     let settings = request.config.watch.clone();
@@ -297,7 +301,7 @@ fn start_watch(
             trug::build::build(&request)
                 .map(|report| eprintln!("trug: built {}", report.dist.display()))
         },
-        || {},
+        move || site.notify_reload(),
     )?;
     Ok(watcher)
 }
