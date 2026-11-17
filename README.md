@@ -1,8 +1,15 @@
 # trug
 
+[<img alt="github" src="https://img.shields.io/badge/github-udoprog/trug-8da0cb?style=for-the-badge&logo=github" height="20">](https://github.com/udoprog/trug)
+[<img alt="crates.io" src="https://img.shields.io/crates/v/trug.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/trug)
+[<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-trug-66c2a5?style=for-the-badge&logoColor=white&logo=data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgdmlld0JveD0iMCAwIDUxMiA1MTIiPjxwYXRoIGZpbGw9IiNmNWY1ZjUiIGQ9Ik00ODguNiAyNTAuMkwzOTIgMjE0VjEwNS41YzAtMTUtOS4zLTI4LjQtMjMuNC0zMy43bC0xMDAtMzcuNWMtOC4xLTMuMS0xNy4xLTMuMS0yNS4zIDBsLTEwMCAzNy41Yy0xNC4xIDUuMy0yMy40IDE4LjctMjMuNCAzMy43VjIxNGwtOTYuNiAzNi4yQzkuMyAyNTUuNSAwIDI2OC45IDAgMjgzLjlWMzk0YzAgMTMuNiA3LjcgMjYuMSAxOS45IDMyLjJsMTAwIDUwYzEwLjEgNS4xIDIyLjEgNS4xIDMyLjIgMGwxMDMuOS01MiAxMDMuOSA1MmMxMC4xIDUuMSAyMi4xIDUuMSAzMi4yIDBsMTAwLTUwYzEyLjItNi4xIDE5LjktMTguNiAxOS45LTMyLjJWMjgzLjljMC0xNS05LjMtMjguNC0yMy40LTMzLjd6TTM1OCAyMTQuOGwtODUgMzEuOXYtNjguMmw4NS0zN3Y3My4zek0xNTQgMTA0LjFsMTAyLTM4LjIgMTAyIDM4LjJ2LjZsLTEwMiA0MS40LTEwMi00MS40di0uNnptODQgMjkxLjFsLTg1IDQyLjV2LTc5LjFsODUtMzguOHY3NS40em0wLTExMmwtMTAyIDQxLjQtMTAyLTQxLjR2LS42bDEwMi0zOC4yIDEwMiAzOC4ydi42em0yNDAgMTEybC04NSA0Mi41di03OS4xbDg1LTM4Ljh2NzUuNHptMC0xMTJsLTEwMiA0MS40LTEwMi00MS40di0uNmwxMDItMzguMiAxMDIgMzguMnYuNnoiPjwvcGF0aD48L3N2Zz4K" height="20">](https://docs.rs/trug)
+[<img alt="build status" src="https://img.shields.io/github/actions/workflow/status/udoprog/trug/ci.yml?branch=main&style=for-the-badge" height="20">](https://github.com/udoprog/trug/actions?query=branch%3Amain)
+
 Builds an app's CSS from its own Sass plus the Sass its crates ship. It uses
 [sasso](https://crates.io/crates/sasso) to compile and `cargo metadata` to find
 the crates, so it has no resolver of its own and never reads crates.io.
+
+<br>
 
 ## Opting in
 
@@ -17,6 +24,8 @@ entry = "_index.scss"  # default; inside dir
 The style directory must be in the package's `include` so it is published.
 Crate names match with `-` and `_` alike.
 
+<br>
+
 ## `pkg:` URLs
 
 - `@use "pkg:<crate>" as x` loads the crate's entry.
@@ -29,6 +38,8 @@ Crate names match with `-` and `_` alike.
 Sasso needs an explicit namespace for the bare `pkg:<crate>` form (`as x` or `as *`).
 Inside a crate, relative imports stay in that crate, and a file reached by two
 routes is loaded once.
+
+<br>
 
 ## The features module
 
@@ -48,9 +59,11 @@ routes is loaded once.
 Features come from the resolve of `cargo metadata`, run with the app's own flags,
 so they match what `cargo tree -e features` reports.
 
+<br>
+
 ## Usage
 
-```
+```shell
 trug css style/app.scss -o dist/app.css -F extra --style compressed
 trug packages
 ```
@@ -61,6 +74,8 @@ Both take the app's cargo flags: `--manifest-path`, `--target` (default
 `--style` and `-o` (written atomically, so a failed build keeps the old file).
 
 From Rust, `trug::build_css(&CssRequest)` does the same in-process.
+
+<br>
 
 ## Building an app (replacing trunk)
 
@@ -74,6 +89,8 @@ wasm-bindgen is taken at the version the app's `Cargo.lock` has: `wasm-bindgen`
 on `PATH` if it is that version, else trug's cache (`$TRUG_CACHE_DIR`, else
 `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`), else it is `cargo install`ed there
 once. Nothing is downloaded from GitHub.
+
+<br>
 
 ### Moving from trunk
 
@@ -90,6 +107,8 @@ directory or Cargo.toml, default `Cargo.toml`), `scss`, `css`, `copy-dir` (with
 `data-target-path`) and `icon`. Any other `rel` is an error. Styles and icons are
 written under content-hashed names. Sass `rel="scss"` links resolve `pkg:` URLs
 like `trug css` does.
+
+<br>
 
 ### Trug.toml
 
@@ -122,9 +141,11 @@ rewrite = "/api"        # optional; the prefix served by trug that the backend p
 no_redirect = false     # hand backend redirects to the client
 ```
 
+<br>
+
 ### Commands
 
-```
+```shell
 trug build [-c Trug.toml] [--release] [-j N] [--public-url /app/] [-v]
 trug serve [--no-watch] [--address ADDR]... [--port N] [build flags]
 ```
@@ -134,16 +155,13 @@ trug serve [--no-watch] [--address ADDR]... [--port N] [build flags]
 each step's time. `--public-url` overrides the `<base data-trug-public-url>` href
 and defaults to `/`.
 
-`trug serve` builds, then serves `dist` with the `[serve]` headers, `index.html`
-for paths that are not files (SPA routes), and the `[[proxy]]` mounts. Unless
-`--no-watch` is given it rebuilds when files under `[watch]` change, one build at
-a time; the served `dist` is only ever swapped by a successful build.
+<br>
 
 ## Serve
 
 `trug serve` builds once, serves `dist` and rebuilds when sources change:
 
-```
+```shell
 trug serve --port 8080 --address 127.0.0.1 --no-watch
 ```
 
@@ -184,6 +202,8 @@ debounce_ms = 200
   failed build.
 - `--no-watch` serves the first build only: no watching, no reload script,
   no `/_trug/reload`.
+
+<br>
 
 ## Proxies
 

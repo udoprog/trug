@@ -1,7 +1,15 @@
 [package]
 name = "trug"
 version = "0.1.0"
+authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2024"
+description = "A trunk replacement that builds, serves and styles Rust wasm apps, with Sass from the crates they depend on."
+documentation = "https://docs.rs/trug"
+readme = "README.md"
+repository = "https://github.com/udoprog/trug"
+license = "MIT OR Apache-2.0"
+keywords = ["build", "sass", "trunk", "wasm"]
+categories = ["development-tools", "wasm"]
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
