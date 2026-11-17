@@ -1,6 +1,9 @@
 //! Watches source files and rebuilds, one build at a time.
 
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
@@ -88,6 +91,49 @@ impl Ignore {
     }
 }
 
+/// Content hashes of watched files, so a write that leaves a file as it was
+/// (a hook regenerating identical output) is not a change.
+#[derive(Debug, Default)]
+struct Contents(HashMap<PathBuf, Option<u64>>);
+
+impl Contents {
+    fn scan(&mut self, dir: &Path, ignore: &Ignore) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if ignore.is_ignored(&path) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => self.scan(&path, ignore),
+                Ok(t) if t.is_file() => {
+                    self.0.insert(path.clone(), hash_file(&path));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Records the path's current content; true when it differs from the last
+    /// recorded one. Directories and unreadable paths count as changed.
+    fn changed(&mut self, path: &Path) -> bool {
+        if path.is_dir() {
+            return true;
+        }
+        let hash = hash_file(path);
+        self.0.insert(path.to_owned(), hash) != Some(hash)
+    }
+}
+
+fn hash_file(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 /// Runs `build` after changes: waits for `debounce` of quiet, builds, and
 /// when changes arrived during the build builds once more. `on_built` fires
 /// after each build that returns `Ok`. Returns when `changes` is closed.
@@ -132,12 +178,23 @@ impl Watcher {
     ) -> Result<Self, Error> {
         let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
         let ignore = request.ignore;
+        let mut contents = Contents::default();
+        for path in &request.paths {
+            contents.scan(path, &ignore);
+        }
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
                 Ok(event) => {
-                    if !event.kind.is_access()
-                        && event.paths.iter().any(|path| !ignore.is_ignored(path))
-                    {
+                    // Every path is checked, so each content is recorded.
+                    let changed = !event.kind.is_access()
+                        && event
+                            .paths
+                            .iter()
+                            .filter(|path| !ignore.is_ignored(path))
+                            .map(|path| contents.changed(path))
+                            .collect::<Vec<_>>()
+                            .contains(&true);
+                    if changed {
                         let _ = tx.send(());
                     }
                 }
@@ -247,6 +304,50 @@ mod tests {
             || swaps += 1,
         );
         assert_eq!(swaps, 0);
+    }
+
+    #[test]
+    fn identical_rewrites_settle_and_changed_content_rebuilds() {
+        let dir = std::env::temp_dir().join(format!("trug-watch-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("gen.scss"), "same").unwrap();
+        let generated = dir.join("gen.scss");
+        let counter = Arc::new(Mutex::new(0u32));
+        let content = Arc::new(Mutex::new(String::from("same")));
+        let (tx, rx) = mpsc::channel();
+        let watcher = Watcher::start(
+            WatchRequest {
+                paths: vec![dir.clone()],
+                ignore: Ignore::new(&dir, &[], vec![], None).unwrap(),
+                debounce: Duration::from_millis(50),
+            },
+            {
+                let counter = counter.clone();
+                let content = content.clone();
+                move || {
+                    *counter.lock().unwrap() += 1;
+                    std::fs::write(&generated, &*content.lock().unwrap()).unwrap();
+                    Ok::<_, String>(())
+                }
+            },
+            move || {
+                let _ = tx.send(());
+            },
+        )
+        .unwrap();
+        std::fs::write(dir.join("a.scss"), "x").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
+        assert!(rx.recv_timeout(Duration::from_millis(800)).is_err());
+        assert_eq!(*counter.lock().unwrap(), 1);
+
+        *content.lock().unwrap() = "changed".into();
+        std::fs::write(dir.join("a.scss"), "y").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
+        assert_eq!(*counter.lock().unwrap(), 3);
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

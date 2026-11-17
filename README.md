@@ -169,8 +169,11 @@ debounce_ms = 200
 - `[watch] watch` lists the paths to watch, relative to `Trug.toml`; the
   directory of `Trug.toml` by default. `ignore` holds globs of paths whose
   changes are ignored. `dist`, its staging directories, `target` and `.git`
-  are always ignored, so a file a `pre_build` hook writes inside a watched
-  directory must be listed in `ignore`, or each build triggers the next.
+  are always ignored. A write that leaves a file's content as it was does not
+  start a rebuild, so a `pre_build` hook that regenerates identical output
+  inside a watched directory settles after one build. A hook whose output
+  changes on every run (a timestamp, say) still rebuilds each time; list such
+  files in `ignore`.
 - A change starts one rebuild after `debounce_ms` of quiet. Builds run one at
   a time; changes during a build queue one more.
 - Each rebuild goes to a staging directory that replaces `dist` only on
