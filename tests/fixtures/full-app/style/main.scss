@@ -1,0 +1,11 @@
+@use "pkg:dep-a" as *;
+@use "pkg:dep-a/features" as f;
+
+$size: 20px;
+
+.main {
+  font-size: $size;
+  @if f.enabled("extra") {
+    border-left: 4px solid green;
+  }
+}

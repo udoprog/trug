@@ -491,6 +491,10 @@ impl Bindgen {
             std::fs::write(&to, bytes).map_err(|e| Error::Io(to, e))?;
             Ok(name)
         };
+        let snippets = self.dir.join("snippets");
+        if snippets.is_dir() {
+            copy_dir(&snippets, &staging.join("snippets"))?;
+        }
         Ok(Assets {
             js: copy(format!("{}.js", self.name), &self.name, "js")?,
             wasm: copy(

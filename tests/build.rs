@@ -44,6 +44,72 @@ fn listing(dir: &Path) -> Vec<String> {
 // Installs wasm-bindgen-cli into target/trug-tests/cache on the first run, which takes minutes.
 #[test]
 #[ignore]
+fn full_app_dist_layout() {
+    let root = work_dir().join("full");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_dir(&fixture("dep-a"), &root.join("dep-a"));
+    let app = root.join("app");
+    copy_dir(&fixture("full-app"), &app);
+
+    let output = build(&app);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(app.join("hook-ran").exists());
+
+    let dist = app.join("dist");
+    let names = listing(&dist);
+    let find = |prefix: &str, suffix: &str| -> String {
+        let found: Vec<_> = names
+            .iter()
+            .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+            .collect();
+        assert_eq!(found.len(), 1, "{prefix}*{suffix} in {names:?}");
+        found[0].clone()
+    };
+    let icon = find("icon-", ".png");
+    let css = find("main-", ".css");
+    let plain = find("plain-", ".css");
+    let js = find("full_app", ".js");
+    let wasm = find("full_app", ".wasm");
+    assert!(names.contains(&"assets".to_owned()));
+    assert!(names.contains(&"static".to_owned()));
+    assert!(!names.contains(&"data".to_owned()));
+    assert!(names.contains(&"snippets".to_owned()));
+    assert_eq!(names.len(), 9, "{names:?}");
+    let snippets = dist.join("snippets");
+    let snippet_dir = listing(&snippets).remove(0);
+    assert!(snippets.join(snippet_dir).join("inline0.js").exists());
+
+    assert_eq!(
+        std::fs::read_to_string(dist.join("assets/hello.txt")).unwrap(),
+        "hello from assets\n"
+    );
+    assert!(dist.join("static/files/nested/data.json").exists());
+
+    let sheet = std::fs::read_to_string(dist.join(&css)).unwrap();
+    assert!(sheet.contains(".a-extra-partial"), "{sheet}");
+    assert!(sheet.contains("font-size: 20px"), "{sheet}");
+    assert!(sheet.contains("border-left"), "{sheet}");
+    assert!(
+        std::fs::read_to_string(dist.join(&plain))
+            .unwrap()
+            .contains(".plain")
+    );
+
+    let index = std::fs::read_to_string(dist.join("index.html")).unwrap();
+    assert!(!index.contains("data-trug"), "{index}");
+    assert!(!index.contains("scss") && !index.contains("static/files"));
+    assert!(index.contains("<base href=\"/app/\">"), "{index}");
+    for name in [&icon, &css, &plain, &js, &wasm] {
+        assert!(index.contains(&format!("/app/{name}")), "{name} in {index}");
+    }
+}
+
+#[test]
+#[ignore]
 fn build_swap_and_failures() {
     let app = work_dir().join("app");
     let _ = std::fs::remove_dir_all(&app);
