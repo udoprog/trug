@@ -145,7 +145,7 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
     let metadata = query.metadata()?;
     let mut bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
     if request.release && request.config.build.wasm_opt != Some(false) {
-        timer.step("wasm-opt", || bindgen.optimize())?;
+        timer.step("wasm-opt", || bindgen.optimize(crate::tools::wasm_opt))?;
     }
 
     timer.step("output", || {
@@ -511,24 +511,17 @@ impl Bindgen {
         Bindgen { dir, name, wasm }
     }
 
-    /// Runs `wasm-opt -Oz` from PATH into a file cached beside the bindgen output.
-    fn optimize(&mut self) -> Result<(), Error> {
+    /// Runs `wasm-opt -Oz` from `find` into a file cached beside the bindgen output; stages the
+    /// unoptimized wasm when `find` has none.
+    fn optimize(&mut self, find: impl FnOnce() -> Option<PathBuf>) -> Result<(), Error> {
         let optimized = format!("{}_bg.opt.wasm", self.name);
         let out = self.dir.join(&optimized);
         if !out.exists() {
-            let found = Command::new("wasm-opt")
-                .arg("--version")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            if !found {
-                eprintln!("trug: wasm-opt not found on PATH; release wasm is not optimized");
+            let Some(wasm_opt) = find() else {
                 return Ok(());
-            }
+            };
             let tmp = out.with_extension(format!("tmp{}", std::process::id()));
-            let status = Command::new("wasm-opt")
+            let status = Command::new(&wasm_opt)
                 .arg("-Oz")
                 .args(WASM_OPT_FEATURES)
                 .arg(self.dir.join(&self.wasm))
@@ -591,7 +584,7 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
     if dir.join(format!("{name}.js")).exists() && dir.join(format!("{name}_bg.wasm")).exists() {
         return Ok(Bindgen::new(dir, name));
     }
-    let binary = find_bindgen(&version)?;
+    let binary = crate::tools::wasm_bindgen(&version).map_err(Error::Bindgen)?;
     let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| Error::Io(tmp.clone(), e))?;
@@ -618,7 +611,7 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
     Ok(Bindgen::new(dir, name))
 }
 
-/// Where trug keeps tools it installs: `$TRUG_CACHE_DIR`, else `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`.
+/// Where trug keeps the tools it downloads: `$TRUG_CACHE_DIR`, else `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`.
 pub fn cache_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TRUG_CACHE_DIR") {
         return dir.into();
@@ -628,53 +621,6 @@ pub fn cache_dir() -> PathBuf {
     }
     let home = std::env::var_os("HOME").unwrap_or_default();
     Path::new(&home).join(".cache/trug")
-}
-
-fn has_version(binary: &Path, version: &str) -> bool {
-    Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .is_ok_and(|out| {
-            String::from_utf8_lossy(&out.stdout).trim() == format!("wasm-bindgen {version}")
-        })
-}
-
-fn find_bindgen(version: &str) -> Result<PathBuf, Error> {
-    let on_path = PathBuf::from("wasm-bindgen");
-    if has_version(&on_path, version) {
-        return Ok(on_path);
-    }
-    let root = cache_dir().join("wasm-bindgen").join(version);
-    let cached = root.join("bin/wasm-bindgen");
-    if has_version(&cached, version) {
-        return Ok(cached);
-    }
-    eprintln!(
-        "trug: installing wasm-bindgen-cli {version} into {}",
-        root.display()
-    );
-    let mut command = Command::new("cargo");
-    command
-        .args([
-            "install",
-            "wasm-bindgen-cli",
-            "--locked",
-            "--version",
-            version,
-            "--root",
-        ])
-        .arg(&root)
-        .stdin(Stdio::null());
-    let status = command
-        .status()
-        .map_err(|e| Error::Bindgen(format!("cargo install: {e}")))?;
-    if !status.success() || !has_version(&cached, version) {
-        return Err(Error::Bindgen(format!(
-            "could not install wasm-bindgen-cli {version}"
-        )));
-    }
-    Ok(cached)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -813,9 +759,22 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
         let mut bindgen = Bindgen::new(tmp.clone(), "app".into());
-        bindgen.optimize().unwrap();
-        let found = tmp.join("app_bg.opt.wasm").exists();
-        assert_eq!(bindgen.wasm == "app_bg.opt.wasm", found);
+        bindgen.optimize(|| None).unwrap();
+        assert_eq!(bindgen.wasm, "app_bg.wasm");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = tmp.join("wasm-opt");
+            std::fs::write(
+                &tool,
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; -*) ;; *) in=$1;; esac; shift; done\ncp \"$in\" \"$out\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bindgen.optimize(|| Some(tool)).unwrap();
+            assert_eq!(bindgen.wasm, "app_bg.opt.wasm");
+            assert!(tmp.join("app_bg.opt.wasm").exists());
+        }
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

@@ -100,13 +100,23 @@ styles, rewrites index.html and writes everything to `dist`. The build goes to a
 staging directory beside `dist`, which replaces `dist` in one rename only when
 the build succeeded, so a failed build leaves the previous `dist` as it was.
 
-wasm-bindgen is taken at the version the app's `Cargo.lock` has: `wasm-bindgen`
-on `PATH` if it is that version, else trug's cache (`$TRUG_CACHE_DIR`, else
-`$XDG_CACHE_HOME/trug`, else `~/.cache/trug`), else it is `cargo install`ed there
-once. Nothing is downloaded from GitHub.
+trug fetches the tools it needs into its cache (`$TRUG_CACHE_DIR`, else
+`$XDG_CACHE_HOME/trug`, else `~/.cache/trug`) once, so later builds need no
+network:
 
-`--release` builds run `wasm-opt -Oz` on the wasm when `wasm-opt` is on `PATH`
-(it is never installed; without it trug warns and stages the wasm unoptimized).
+- wasm-bindgen, at the version the app's `Cargo.lock` has: `wasm-bindgen` on
+  `PATH` if it is that version, else the cache, else the prebuilt release from
+  [github.com/wasm-bindgen/wasm-bindgen] into `wasm-bindgen/<version>/`, checked
+  against its published sha256. Without a prebuilt for the host, or when the
+  download fails, it is `cargo install`ed there instead.
+- wasm-opt, which `--release` builds run as `wasm-opt -Oz` on the wasm:
+  `wasm-opt` on `PATH` if there is one, else binaryen's prebuilt release (a
+  version pinned in trug) from [github.com/WebAssembly/binaryen] into
+  `binaryen/<version>/`, checked against its sha256. Without one trug warns and
+  stages the wasm unoptimized.
+
+[github.com/wasm-bindgen/wasm-bindgen]: https://github.com/wasm-bindgen/wasm-bindgen/releases
+[github.com/WebAssembly/binaryen]: https://github.com/WebAssembly/binaryen/releases
 
 <br>
 
