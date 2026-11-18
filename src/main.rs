@@ -63,6 +63,10 @@ enum Command {
         /// Serve the first build without rebuilding when sources change.
         #[arg(long)]
         no_watch: bool,
+        /// Glob of paths whose changes are ignored, relative to `Trug.toml`; repeatable. Adds to
+        /// `[watch] ignore`.
+        #[arg(long = "ignore", value_name = "GLOB")]
+        ignore: Vec<String>,
         #[arg(short, long)]
         config: Option<PathBuf>,
         #[arg(short, long)]
@@ -197,6 +201,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             addresses,
             port,
             no_watch,
+            ignore,
             cargo,
         } => {
             let (config, root) = load_config(config, dist)?;
@@ -229,7 +234,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let _watcher = if no_watch {
                 None
             } else {
-                Some(start_watch(request, site.clone())?)
+                Some(start_watch(request, ignore, site.clone())?)
             };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listeners = trug::serve::bind(&addresses, port).await?;
@@ -281,10 +286,12 @@ fn load_config(
 
 fn start_watch(
     request: trug::build::BuildRequest,
+    ignore: Vec<String>,
     site: trug::serve::Site,
 ) -> Result<trug::watch::Watcher, Box<dyn std::error::Error>> {
     let root = request.root.clone();
-    let settings = request.config.watch.clone();
+    let mut settings = request.config.watch.clone();
+    settings.ignore.extend(ignore);
     let paths = request.config.paths(&root);
     let mut watch: Vec<PathBuf> = match &settings.watch {
         Some(list) => list.iter().map(|p| root.join(p)).collect(),
@@ -323,4 +330,19 @@ fn start_watch(
         move || site.notify_reload(),
     )?;
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_ignore_is_repeatable() {
+        let cli = Cli::try_parse_from(["trug", "serve", "--ignore", "a/**", "--ignore", "*.wgsl"])
+            .unwrap();
+        let Command::Serve { ignore, .. } = cli.command else {
+            panic!("expected serve");
+        };
+        assert_eq!(ignore, ["a/**", "*.wgsl"]);
+    }
 }

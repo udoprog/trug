@@ -171,7 +171,7 @@
 //!
 //! ```shell
 //! trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/] [-v]
-//! trug serve [--no-watch] [--address ADDR]... [--port N] [build flags]
+//! trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
 //! ```
 //!
 //! `trug build` takes the app's cargo flags (`--manifest-path`, `--target`, `-F`,
@@ -227,6 +227,8 @@
 //!   failed build.
 //! - `--no-watch` serves the first build only: no watching, no reload script,
 //!   no `/_trug/reload`.
+//! - `--ignore GLOB` (repeatable) adds to `[watch] ignore` for one run, so
+//!   `trug serve --ignore 'src/shaders/**'` keeps shader edits from rebuilding.
 //!
 //! <br>
 //!
