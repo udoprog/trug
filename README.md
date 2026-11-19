@@ -96,9 +96,15 @@ From Rust, `trug::build_css(&CssRequest)` does the same in-process.
 
 `trug build` does what `trunk build` does for an app: it runs the `[[hooks]]`,
 builds the crate for `wasm32-unknown-unknown`, runs wasm-bindgen, compiles the
-styles, rewrites index.html and writes everything to `dist`. The build goes to a
-staging directory beside `dist`, which replaces `dist` in one rename only when
+styles, rewrites index.html and writes everything to `dist`, which is `dist`
+beside index.html unless `[build] dist` or `-d` names another. The build goes to
+a staging directory beside `dist`, which replaces `dist` in one rename only when
 the build succeeded, so a failed build leaves the previous `dist` as it was.
+
+The app's wasm and JS go to the top of `dist` as `<name>_bg-<hash>.wasm` and
+`<name>-<hash>.js`. `<name>` is the stem of the wasm cargo builds (for a cdylib,
+the lib name with `-` as `_`) and `<hash>` is the first 16 hex digits of the
+file's sha256.
 
 trug fetches the tools it needs into its cache (`$TRUG_CACHE_DIR`, else
 `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`) once, so later builds need no
@@ -109,7 +115,8 @@ network:
   [github.com/wasm-bindgen/wasm-bindgen] into `wasm-bindgen/<version>/`, checked
   against its published sha256. Without a prebuilt for the host, or when the
   download fails, it is `cargo install`ed there instead.
-- wasm-opt, which `--release` builds run as `wasm-opt -Oz` on the wasm:
+- wasm-opt, which `--release` builds run as `wasm-opt -Oz` on the wasm unless
+  `[build] wasm_opt = false`; dev builds never run it. It is
   `wasm-opt` on `PATH` if there is one, else binaryen's prebuilt release (a
   version pinned in trug) from [github.com/WebAssembly/binaryen] into
   `binaryen/<version>/`, checked against its sha256. Without one trug warns and
@@ -142,7 +149,7 @@ trug's output differs from trunk's:
 
 - `index.html` has no SRI `integrity` attributes, no `window.wasmBindings` and no
   `TrunkApplicationStarted` event.
-- The wasm is named `web_bg-HASH.wasm`, where trunk writes `web-HASH_bg.wasm`.
+- The wasm is named `<name>_bg-HASH.wasm`, where trunk writes `<name>-HASH_bg.wasm`.
 - There is no `.trunk-lock`.
 
 <br>
