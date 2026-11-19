@@ -197,12 +197,7 @@ fn install(
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let result = (|| {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("trug/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(None)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = client()?;
         let archive = tmp.join("archive.tar.gz");
         let digest = download(&client, url, &archive)?;
         match get(&client, checksum)? {
@@ -216,7 +211,7 @@ fn install(
             None => {}
         }
         let out = tmp.join("out");
-        if extract(&archive, &out, &pick)? == 0 {
+        if extract(&archive, 1, &out, &pick)? == 0 {
             return Err(format!("{url}: nothing to extract"));
         }
         let _ = fs::remove_dir_all(root);
@@ -231,8 +226,18 @@ fn install(
     result
 }
 
+/// The blocking client downloads use.
+pub(crate) fn client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("trug/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(None)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// `None` on 404.
-fn get(
+pub(crate) fn get(
     client: &reqwest::blocking::Client,
     url: &str,
 ) -> Result<Option<reqwest::blocking::Response>, String> {
@@ -247,7 +252,11 @@ fn get(
 }
 
 /// Streams `url` into `to`; returns its sha256.
-fn download(client: &reqwest::blocking::Client, url: &str, to: &Path) -> Result<String, String> {
+pub(crate) fn download(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    to: &Path,
+) -> Result<String, String> {
     let mut response = get(client, url)?.ok_or_else(|| format!("{url}: not found"))?;
     let mut file = File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
     let mut hasher = Sha256::new();
@@ -271,10 +280,11 @@ fn checksum_matches(text: &str, digest: &str) -> bool {
         .is_some_and(|sum| sum.eq_ignore_ascii_case(digest))
 }
 
-/// Extracts each regular file `pick` maps (by its path below the archive's top directory) to a
-/// path under `out`; returns how many it extracted.
-fn extract(
+/// Extracts each regular file `pick` maps (by its path below the archive's first `skip`
+/// directories) to a path under `out`; returns how many it extracted.
+pub(crate) fn extract(
     archive: &Path,
+    skip: usize,
     out: &Path,
     pick: &dyn Fn(&Path) -> Option<PathBuf>,
 ) -> Result<usize, String> {
@@ -288,7 +298,7 @@ fn extract(
             continue;
         }
         let path = entry.path().map_err(error)?.into_owned();
-        let rel: PathBuf = path.components().skip(1).collect();
+        let rel: PathBuf = path.components().skip(skip).collect();
         if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
             continue;
         }
@@ -390,7 +400,7 @@ mod tests {
         }
         builder.into_inner().unwrap().finish().unwrap();
         let out = dir.join("out");
-        let count = extract(&archive, &out, &|rel| {
+        let count = extract(&archive, 1, &out, &|rel| {
             (rel == Path::new("bin/wasm-opt")).then(|| rel.to_owned())
         })
         .unwrap();

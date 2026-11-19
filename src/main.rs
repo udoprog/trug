@@ -88,6 +88,8 @@ enum Command {
         #[command(flatten)]
         cargo: CargoArgs,
     },
+    /// Update trug to the latest GitHub release.
+    Update,
     /// List the crates that ship styles, with their enabled features.
     Packages {
         #[command(flatten)]
@@ -248,6 +250,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Ok::<_, Box<dyn std::error::Error>>(())
             })?;
         }
+        Command::Update => trug::update::update()?,
         Command::Packages { cargo } => {
             for package in Query::from(cargo).packages()? {
                 let features = package.features.into_iter().collect::<Vec<_>>();

@@ -205,6 +205,7 @@ no_redirect = false     # hand backend redirects to the client
 ```shell
 trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/] [-v]
 trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
+trug update
 ```
 
 `trug build` takes the app's cargo flags (`--manifest-path`, `--target`, `-F`,
@@ -212,6 +213,9 @@ trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build
 each step's time. `--public-url` overrides the `<base data-trug-public-url>` href
 and defaults to `/`. `-d`/`--dist DIR` overrides `[build] dist` with a path
 relative to the current directory; it is still replaced only on success.
+
+`trug update` replaces the running binary with the latest GitHub release of
+`udoprog/trug` for this platform, or says it is already up to date.
 
 <br>
 
