@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+    - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        type: string
+
+env:
+  KICK_VERSION: "${{github.event.inputs.version || github.ref_name}}"
+  RUST_LOG: kick=trace
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Check that the version matches Cargo.toml
+      run: |
+        manifest=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+        if [ "$manifest" != "$KICK_VERSION" ]; then
+          echo "Version $KICK_VERSION does not match Cargo.toml version $manifest" >&2
+          exit 1
+        fi
+
+  build:
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+        - {os: windows-latest, method: zip}
+        - {os: macos-latest, method: gzip}
+        - {os: ubuntu-latest, method: gzip}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - uses: udoprog/kick@nightly
+    - run: cargo build --release
+    - run: kick ${{matrix.method}} --output dist
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dist-${{matrix.os}}
+        path: dist
+
+  publish:
+    permissions: write-all
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v7
+      with: {name: dist-macos-latest, path: dist}
+    - uses: actions/download-artifact@v7
+      with: {name: dist-windows-latest, path: dist}
+    - uses: actions/download-artifact@v7
+      with: {name: dist-ubuntu-latest, path: dist}
+    - uses: udoprog/kick@nightly
+    - run: kick gh release --upload "dist/*" --github-action
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
