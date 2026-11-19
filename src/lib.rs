@@ -7,6 +7,18 @@
 //!
 //! <br>
 //!
+//! ## Install
+//!
+//! Prebuilt binaries for Linux (x86_64) and macOS (aarch64) install into
+//! `~/.local/bin` (override with `TRUG_INSTALL_DIR`; pin a release with
+//! `TRUG_VERSION`):
+//!
+//! ```sh
+//! curl -fsSL https://udoprog.github.io/trug/install.sh | sh
+//! ```
+//!
+//! <br>
+//!
 //! ## Opting in
 //!
 //! A crate that ships Sass says so in its Cargo.toml:
