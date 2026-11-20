@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn a_single_file_can_be_proxied() {
+        // A backend-rendered file such as `/sw.js` needs its own entry.
+        let p = proxy("http://h:1/sw.js", None);
+        assert_eq!(p.target("/sw.js", None).unwrap(), "http://h:1/sw.js");
+        assert_eq!(p.target("/sw.js.map", None), None);
+        assert_eq!(p.target("/other.js", None), None);
+    }
+
+    #[test]
     fn rewrite_replaces_the_prefix() {
         let p = proxy("http://h:1/", Some("/api/"));
         assert_eq!(p.target("/api/users", None).unwrap(), "http://h:1/users");
