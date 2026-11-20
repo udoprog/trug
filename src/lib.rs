@@ -1,9 +1,43 @@
 //! [<img alt="github" src="https://img.shields.io/badge/github-udoprog/trug-8da0cb?style=for-the-badge&logo=github" height="20">](https://github.com/udoprog/trug)
 //! [<img alt="crates.io" src="https://img.shields.io/crates/v/trug.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/trug)
 //! [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-trug-66c2a5?style=for-the-badge&logoColor=white&logo=data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgdmlld0JveD0iMCAwIDUxMiA1MTIiPjxwYXRoIGZpbGw9IiNmNWY1ZjUiIGQ9Ik00ODguNiAyNTAuMkwzOTIgMjE0VjEwNS41YzAtMTUtOS4zLTI4LjQtMjMuNC0zMy43bC0xMDAtMzcuNWMtOC4xLTMuMS0xNy4xLTMuMS0yNS4zIDBsLTEwMCAzNy41Yy0xNC4xIDUuMy0yMy40IDE4LjctMjMuNCAzMy43VjIxNGwtOTYuNiAzNi4yQzkuMyAyNTUuNSAwIDI2OC45IDAgMjgzLjlWMzk0YzAgMTMuNiA3LjcgMjYuMSAxOS45IDMyLjJsMTAwIDUwYzEwLjEgNS4xIDIyLjEgNS4xIDMyLjIgMGwxMDMuOS01MiAxMDMuOSA1MmMxMC4xIDUuMSAyMi4xIDUuMSAzMi4yIDBsMTAwLTUwYzEyLjItNi4xIDE5LjktMTguNiAxOS45LTMyLjJWMjgzLjljMC0xNS05LjMtMjguNC0yMy40LTMzLjd6TTM1OCAyMTQuOGwtODUgMzEuOXYtNjguMmw4NS0zN3Y3My4zek0xNTQgMTA0LjFsMTAyLTM4LjIgMTAyIDM4LjJ2LjZsLTEwMiA0MS40LTEwMi00MS40di0uNnptODQgMjkxLjFsLTg1IDQyLjV2LTc5LjFsODUtMzguOHY3NS40em0wLTExMmwtMTAyIDQxLjQtMTAyLTQxLjR2LS42bDEwMi0zOC4yIDEwMiAzOC4ydi42em0yNDAgMTEybC04NSA0Mi41di03OS4xbDg1LTM4Ljh2NzUuNHptMC0xMTJsLTEwMiA0MS40LTEwMi00MS40di0uNmwxMDItMzguMiAxMDIgMzguMnYuNnoiPjwvcGF0aD48L3N2Zz4K" height="20">](https://docs.rs/trug)
-//! Builds an app's CSS from its own Sass plus the Sass its crates ship. It uses
-//! [sasso](https://crates.io/crates/sasso) to compile and `cargo metadata` to find
-//! the crates, so it has no resolver of its own and never reads crates.io.
+//!
+//! trug builds Rust frontend apps for the browser. Point it at an `index.html`
+//! and it compiles your crate to WebAssembly, runs wasm-bindgen, compiles your
+//! Sass and writes a ready-to-serve `dist` with content-hashed files. `trug
+//! serve` does the same, then rebuilds and reloads the page as you edit.
+//!
+//! If you have used [trunk](https://trunkrs.dev), trug will feel familiar:
+//! moving over is three renames. What trug adds:
+//!
+//! - **Crates ship their own styles.** A component crate keeps its Sass next to
+//!   its Rust code, and the app pulls it in with `@use "pkg:<crate>"`. trug
+//!   finds the crates through `cargo metadata`, so styles follow your
+//!   dependency graph and its versions, with no npm, no copied files and no
+//!   resolver of its own. A stylesheet can be tied to a Cargo feature, so
+//!   turning the feature off drops its CSS too.
+//! - **A broken build never breaks your page.** Every build goes to a staging
+//!   directory that replaces `dist` in one rename, and only if it succeeded.
+//!   While serving, a failed build keeps the last good page up and shows
+//!   cargo's diagnostics in an overlay on it. The page reloads only after a
+//!   build that worked.
+//! - **No toolchain to assemble.** trug is a single binary. Sass compiles
+//!   in-process with [sasso](https://crates.io/crates/sasso), a pure-Rust
+//!   compiler, so you need neither Node nor dart-sass. trug fetches
+//!   wasm-bindgen at the exact version in your `Cargo.lock`, and wasm-opt for
+//!   release builds. Downloads are checked against their sha256 and cached,
+//!   so later builds work offline.
+//! - **A dev server for real apps.** It proxies HTTP and WebSocket routes to
+//!   your backend, adds custom headers, falls back to `index.html` for SPA
+//!   routes and serves under a public URL prefix.
+//!
+//! ```sh
+//! trug serve            # build, serve on 127.0.0.1:8080, rebuild on change
+//! trug build --release  # optimized build into dist
+//! ```
+//!
+//! The Sass half also works on its own: `trug css` and `trug::build_css` build
+//! just the stylesheet.
 //!
 //! <br>
 //!
