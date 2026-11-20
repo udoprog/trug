@@ -1,6 +1,6 @@
 [package]
 name = "trug"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2024"
 description = "A trunk replacement for component bundling."
