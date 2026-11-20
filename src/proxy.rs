@@ -5,7 +5,7 @@ use std::fmt;
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequest, Request};
-use axum::http::header::{HOST, HeaderName, HeaderValue};
+use axum::http::header::{HOST, HeaderName, HeaderValue, ORIGIN};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Response;
 
@@ -51,6 +51,7 @@ pub struct Proxy {
     ws: bool,
     scheme: String,
     authority: String,
+    origin: Option<HeaderValue>,
     base: String,
     client: reqwest::Client,
 }
@@ -90,11 +91,21 @@ impl Proxy {
             .no_proxy()
             .build()
             .map_err(Error::Client)?;
+        let origin = if config.change_origin {
+            let scheme = if scheme == "ws" { "http" } else { scheme };
+            Some(
+                HeaderValue::try_from(format!("{scheme}://{authority}"))
+                    .map_err(|_| bad("not a valid origin"))?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             mount: mount.to_owned(),
             ws: config.ws,
             scheme: scheme.to_owned(),
             authority: authority.to_string(),
+            origin,
             base: uri.path().trim_start_matches('/').to_owned(),
             client,
         })
@@ -155,7 +166,7 @@ impl Proxy {
             .await
             .map_err(|e| e.to_string())?;
         let mut handshake = url.into_client_request()?;
-        for (name, value) in &forwarded(&headers) {
+        for (name, value) in &self.outbound(&headers) {
             if !name.as_str().starts_with("sec-websocket-") {
                 handshake.headers_mut().append(name.clone(), value.clone());
             }
@@ -174,7 +185,7 @@ impl Proxy {
             .target(parts.uri.path(), parts.uri.query())
             .ok_or("path outside the proxy mount")?;
         let body = axum::body::to_bytes(body, usize::MAX).await?;
-        let mut headers = forwarded(&parts.headers);
+        let mut headers = self.outbound(&parts.headers);
         headers.insert(HOST, HeaderValue::try_from(self.authority.as_str())?);
         let upstream = self
             .client
@@ -193,6 +204,19 @@ impl Proxy {
             }
         }
         Ok(response)
+    }
+}
+
+impl Proxy {
+    /// The client's headers for the backend, with `Origin` rewritten if configured.
+    fn outbound(&self, headers: &HeaderMap) -> HeaderMap {
+        let mut out = forwarded(headers);
+        if let Some(origin) = &self.origin
+            && out.contains_key(ORIGIN)
+        {
+            out.insert(ORIGIN, origin.clone());
+        }
+        out
     }
 }
 
@@ -295,6 +319,7 @@ mod tests {
             rewrite: rewrite.map(Into::into),
             no_redirect: false,
             ws: false,
+            change_origin: false,
         })
         .unwrap()
     }
@@ -351,6 +376,7 @@ mod tests {
                 rewrite: rewrite.map(Into::into),
                 no_redirect: false,
                 ws: false,
+                change_origin: false,
             })
             .is_err()
         };

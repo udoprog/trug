@@ -101,7 +101,7 @@ mod proxy {
     use trug::config::Proxy;
     use trug::serve::{Site, bind};
 
-    /// Replies 200 echoing the request line and Host header; `/redir` gives a 302 to `/landed`.
+    /// Replies 200 echoing the request line, Host and Origin headers; `/redir` gives a 302 to `/landed`.
     fn backend() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -112,6 +112,7 @@ mod proxy {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 let mut host = String::new();
+                let mut origin = String::new();
                 loop {
                     let mut h = String::new();
                     reader.read_line(&mut h).unwrap();
@@ -121,6 +122,9 @@ mod proxy {
                     if let Some(v) = h.to_ascii_lowercase().strip_prefix("host:") {
                         host = v.trim().to_string();
                     }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("origin:") {
+                        origin = v.trim().to_string();
+                    }
                 }
                 let target = line.split(' ').nth(1).unwrap().to_string();
                 let reply = if target.ends_with("/redir") {
@@ -129,7 +133,7 @@ mod proxy {
                     "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded"
                         .to_string()
                 } else {
-                    let body = format!("{target} host={host}");
+                    let body = format!("{target} host={host} origin={origin}");
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -176,6 +180,7 @@ mod proxy {
             rewrite: rewrite.map(Into::into),
             no_redirect,
             ws: false,
+            change_origin: false,
         }
     }
 
@@ -185,8 +190,35 @@ mod proxy {
         let addr = start(&[proxy(format!("http://{b}/api/"), None, false)]);
         let out = get(addr, "/api/users?x=1");
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
-        assert!(out.ends_with(&format!("/api/users?x=1 host={b}")), "{out}");
+        assert!(
+            out.ends_with(&format!("/api/users?x=1 host={b} origin=")),
+            "{out}"
+        );
         assert!(get(addr, "/").ends_with("<p>index</p>"));
+    }
+
+    #[test]
+    fn change_origin_rewrites_origin_only_when_set() {
+        let b = backend();
+        let mut on = proxy(format!("http://{b}/on/"), None, false);
+        on.change_origin = true;
+        let off = proxy(format!("http://{b}/off/"), None, false);
+        let addr = start(&[on, off]);
+        let send = |path: &str, origin: &str| {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: front\r\n{origin}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut out = String::new();
+            stream.read_to_string(&mut out).unwrap();
+            out
+        };
+        let sent = "Origin: http://front\r\n";
+        assert!(send("/on/x", sent).contains(&format!("origin=http://{b}")));
+        assert!(send("/off/x", sent).contains("origin=http://front"));
+        assert!(send("/on/x", "").ends_with("origin="));
     }
 
     #[test]
@@ -220,8 +252,17 @@ mod proxy {
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn websocket_round_trip() {
+        websocket_round_trip_with(false, "http://app.test");
+    }
+
+    #[test]
+    fn websocket_change_origin_rewrites_origin() {
+        websocket_round_trip_with(true, "http://BACKEND");
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn websocket_round_trip_with(change_origin: bool, expected_origin: &str) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -231,7 +272,9 @@ mod proxy {
         let b = std_listener.local_addr().unwrap();
         let mut p = proxy(format!("ws://{b}/ws"), Some("/socket"), false);
         p.ws = true;
+        p.change_origin = change_origin;
         let addr = start(&[p]);
+        let expected_origin = expected_origin.replace("BACKEND", &b.to_string());
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
@@ -244,7 +287,7 @@ mod proxy {
                         assert_eq!(req.uri().query(), Some("a=1"));
                         let header = |name| req.headers()[name].to_str().unwrap();
                         assert_eq!(header("cookie"), "session=abc");
-                        assert_eq!(header("origin"), "http://app.test");
+                        assert_eq!(header("origin"), expected_origin);
                         assert_eq!(header("host"), b.to_string());
                         assert_eq!(header("x-forwarded-host"), addr.to_string());
                         Ok(res)

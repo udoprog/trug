@@ -69,6 +69,9 @@ pub struct Proxy {
     /// Proxy WebSocket connections; `backend` is then a `ws://` URL.
     #[serde(default)]
     pub ws: bool,
+    /// Rewrite a request's `Origin` header to the backend's origin.
+    #[serde(default)]
+    pub change_origin: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
