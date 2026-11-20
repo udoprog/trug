@@ -84,6 +84,8 @@ struct State {
     /// Bumped whenever `live` changes, so a ticker knows its step is over.
     generation: u64,
     drawn: bool,
+    /// When a proxy warning last printed, and how many were held back since.
+    proxy: Option<(Instant, u32)>,
 }
 
 pub struct Term {
@@ -100,6 +102,7 @@ impl Term {
                 live: None,
                 generation: 0,
                 drawn: false,
+                proxy: None,
             }),
         })
     }
@@ -233,8 +236,28 @@ impl Term {
             }
             Event::BuildFailed(error) => self.build_failed(error),
             Event::Changed(paths) => self.changed(paths),
-            Event::ProxyError(error) => self.warning(&format!("proxy: {error}")),
+            Event::ProxyError(error) => self.proxy_error(error),
             _ => {}
+        }
+    }
+
+    /// Prints a proxy warning at most every few seconds, counting the ones held back.
+    fn proxy_error(&self, error: &str) {
+        let held = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &mut state.proxy {
+                Some((at, held)) if at.elapsed() < PROXY_WARNING_EVERY => {
+                    *held += 1;
+                    return;
+                }
+                proxy => proxy
+                    .replace((Instant::now(), 0))
+                    .map_or(0, |(_, held)| held),
+            }
+        };
+        match held {
+            0 => self.warning(&format!("proxy: {error}")),
+            n => self.warning(&format!("proxy: {error} ({n} similar held back)")),
         }
     }
 
@@ -411,6 +434,9 @@ impl Term {
 }
 
 /// The verb and label a step is shown with.
+/// How often a proxy warning may print while the backend keeps failing.
+const PROXY_WARNING_EVERY: Duration = Duration::from_secs(5);
+
 fn words(step: &str) -> (&'static str, &'static str) {
     match step {
         "hooks" => ("Running", "hooks"),
@@ -639,6 +665,16 @@ mod tests {
             path: Path::new("/bin/wasm-opt"),
         });
         assert_eq!(buffer.text(), "");
+    }
+
+    #[test]
+    fn repeated_proxy_warnings_collapse() {
+        let (term, buffer) = capture(Options::default());
+        let reporter = term.reporter();
+        for _ in 0..3 {
+            reporter.emit(&Event::ProxyError("down"));
+        }
+        assert_eq!(buffer.text(), "warning: proxy: down\n");
     }
 
     #[test]

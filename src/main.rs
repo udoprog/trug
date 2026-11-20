@@ -204,6 +204,7 @@ fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Err
                 jobs,
                 public_url,
                 quiet,
+                color: term.options().color,
                 reporter: term.reporter(),
             })?;
             term.finished(&report, release, start.elapsed(), true);
@@ -232,6 +233,7 @@ fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Err
                 jobs,
                 public_url,
                 quiet,
+                color: term.options().color,
                 reporter: term.reporter(),
             };
             let start = Instant::now();
@@ -383,7 +385,7 @@ fn start_watch(
                         Ok(())
                     }
                     Err(error) => {
-                        site.notify_error(&error.to_string());
+                        site.notify_error(&error.detail());
                         Err(error)
                     }
                 }

@@ -35,7 +35,7 @@ const RELOAD_SCRIPT: &str = concat!(
     "o.style.cssText=\"position:fixed;inset:0;z-index:2147483647;margin:0;padding:2em;",
     "overflow:auto;background:rgba(24,0,0,.92);color:#fdd;font:13px/1.5 monospace;",
     "white-space:pre-wrap;cursor:pointer\";",
-    "o.title=\"Click to dismiss\";o.onclick=()=>o.remove();document.body.append(o)}",
+    "o.title=\"Click to dismiss\";o.onclick=()=>o.remove();document.documentElement.append(o)}",
     "o.textContent=\"trug: build failed; serving the last good build\\n\\n\"+e.data})})()",
     "</script>"
 );

@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
+use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use cargo_metadata::diagnostic::DiagnosticLevel;
 use cargo_metadata::{Message, Metadata};
 use sha2::{Digest, Sha256};
 
@@ -25,7 +26,12 @@ pub enum Error {
     Packages(crate::packages::Error),
     Html(String),
     Hook(String),
-    Cargo(String),
+    /// `message` is the one-line failure; `output` holds cargo's error diagnostics and
+    /// build-script output, which already went to the terminal.
+    Cargo {
+        message: String,
+        output: String,
+    },
     Bindgen(String),
     Css(String),
 }
@@ -37,11 +43,37 @@ impl fmt::Display for Error {
             Error::Packages(error) => error.fmt(f),
             Error::Html(m)
             | Error::Hook(m)
-            | Error::Cargo(m)
+            | Error::Cargo { message: m, .. }
             | Error::Bindgen(m)
             | Error::Css(m) => m.fmt(f),
         }
     }
+}
+
+impl Error {
+    /// The error with what the terminal already showed of cargo, without ANSI codes: for a page.
+    pub fn detail(&self) -> String {
+        match self {
+            Error::Cargo { message, output } if !output.is_empty() => {
+                format!("{message}\n\n{}", strip_ansi(output).trim_end())
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
+/// `text` without ANSI escape sequences.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+        } else if chars.next_if_eq(&'[').is_some() {
+            while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {}
+        }
+    }
+    out
 }
 
 impl std::error::Error for Error {}
@@ -65,6 +97,9 @@ pub struct BuildRequest {
     pub public_url: Option<String>,
     /// Passes `--quiet` to cargo.
     pub quiet: bool,
+    /// Passes `--color always` to cargo and keeps colour in the diagnostics written to stderr;
+    /// `--color never` and plain diagnostics otherwise.
+    pub color: bool,
     /// Gets the build's progress; silent by default.
     pub reporter: Reporter,
 }
@@ -526,7 +561,9 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
     command
         .args([
             "build",
-            "--message-format=json-render-diagnostics",
+            "--message-format=json-diagnostic-rendered-ansi",
+            "--color",
+            if request.color { "always" } else { "never" },
             "--target",
         ])
         .arg(WASM_TARGET)
@@ -552,20 +589,47 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
             command.arg(flag);
         }
     }
+    if io::stderr().is_terminal() {
+        // Cargo draws no progress bar when its stderr is a pipe.
+        command.env("CARGO_TERM_PROGRESS_WHEN", "always");
+        command.env("CARGO_TERM_PROGRESS_WIDTH", terminal_width().to_string());
+    }
     let line = command_line(&command);
     request.reporter.emit(&Event::Command(&line));
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::Cargo(format!("`{line}`: {e}")))?;
+        .map_err(|e| cargo_error(format!("`{line}`: {e}")))?;
     let stdout = io::BufReader::new(child.stdout.take().expect("piped"));
+    let stderr = child.stderr.take().expect("piped");
+    let stderr = std::thread::spawn(move || tee_stderr(stderr, io::stderr()));
+    let ansi = request.color;
+    let mut errors = String::new();
     let wanted = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
     let mut wasm = None;
     let mut found_cdylib = false;
     for message in Message::parse_stream(stdout).flatten() {
-        let Message::CompilerArtifact(artifact) = message else {
-            continue;
+        let artifact = match message {
+            Message::CompilerMessage(m) => {
+                if let Some(rendered) = &m.message.rendered {
+                    let _ = if ansi {
+                        write!(io::stderr(), "{rendered}")
+                    } else {
+                        write!(io::stderr(), "{}", strip_ansi(rendered))
+                    };
+                    if matches!(
+                        m.message.level,
+                        DiagnosticLevel::Error | DiagnosticLevel::Ice
+                    ) {
+                        errors.push_str(rendered);
+                    }
+                }
+                continue;
+            }
+            Message::CompilerArtifact(artifact) => artifact,
+            _ => continue,
         };
         let same = std::fs::canonicalize(&artifact.manifest_path).is_ok_and(|path| path == wanted);
         let kinds = |wanted: &str| artifact.target.kind.iter().any(|k| k.to_string() == wanted);
@@ -583,16 +647,81 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
     }
     let status = child
         .wait()
-        .map_err(|e| Error::Cargo(format!("cargo: {e}")))?;
+        .map_err(|e| cargo_error(format!("cargo: {e}")))?;
+    let tail = stderr.join().unwrap_or_default();
     if !status.success() {
-        return Err(Error::Cargo(format!("`{line}` failed: {status}")));
+        errors.push_str(&tail);
+        return Err(Error::Cargo {
+            message: format!("`{line}` failed: {status}"),
+            output: errors,
+        });
     }
     wasm.ok_or_else(|| {
-        Error::Cargo(format!(
+        cargo_error(format!(
             "{} builds no wasm cdylib or bin; add crate-type = [\"cdylib\"] to its [lib]",
             manifest.display()
         ))
     })
+}
+
+fn cargo_error(message: String) -> Error {
+    Error::Cargo {
+        message,
+        output: String::new(),
+    }
+}
+
+/// Copies cargo's stderr to `out` as raw bytes, so progress redraws reach a terminal; returns
+/// what follows its first `error` line, which is where build scripts' output and the failure
+/// summary start. Text a `\r` overwrites, such as a progress bar, is left out.
+fn tee_stderr(mut stderr: impl io::Read, mut out: impl Write) -> String {
+    let mut errors = String::new();
+    let mut seen = false;
+    let mut line = Vec::new();
+    let mut buf = [0; 4096];
+    loop {
+        let n = match stderr.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let _ = out.write_all(&buf[..n]);
+        let _ = out.flush();
+        for &b in &buf[..n] {
+            match b {
+                b'\r' => line.clear(),
+                b'\n' => {
+                    let text = String::from_utf8_lossy(&line);
+                    seen = seen || strip_ansi(&text).trim_start().starts_with("error");
+                    if seen {
+                        errors.push_str(&text);
+                        errors.push('\n');
+                    }
+                    line.clear();
+                }
+                _ => line.push(b),
+            }
+        }
+    }
+    errors
+}
+
+/// The width of stderr's terminal, 80 when unknown.
+#[cfg(unix)]
+fn terminal_width() -> usize {
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+    // SAFETY: TIOCGWINSZ fills a winsize and nothing else.
+    let ok = unsafe { libc::ioctl(2, libc::TIOCGWINSZ, size.as_mut_ptr()) } == 0;
+    let cols = if ok {
+        usize::from(unsafe { size.assume_init() }.ws_col)
+    } else {
+        0
+    };
+    if cols == 0 { 80 } else { cols }
+}
+
+#[cfg(not(unix))]
+fn terminal_width() -> usize {
+    80
 }
 
 /// The files wasm-bindgen produced.
@@ -829,6 +958,37 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cargo_errors_carry_plain_diagnostics_for_pages_only() {
+        let error = Error::Cargo {
+            message: "`cargo build` failed: exit status: 101".into(),
+            output: "\x1b[1;31merror[E0308]\x1b[0m: mismatched types\n".into(),
+        };
+        assert_eq!(error.to_string(), "`cargo build` failed: exit status: 101");
+        assert_eq!(
+            error.detail(),
+            "`cargo build` failed: exit status: 101\n\nerror[E0308]: mismatched types"
+        );
+        assert_eq!(cargo_error("x".into()).detail(), "x");
+    }
+
+    #[test]
+    fn stderr_keeps_what_follows_the_first_error() {
+        let text = "   Compiling a v0.1.0\nerror: failed to run custom build command\n  panic: Undefined variable\n";
+        assert_eq!(
+            tee_stderr(text.as_bytes(), io::sink()),
+            "error: failed to run custom build command\n  panic: Undefined variable\n"
+        );
+    }
+
+    #[test]
+    fn stderr_is_copied_raw_without_progress_redraws() {
+        let text = "Building [=>  ] 1/9\rBuilding [==> ] 2/9\r\x1b[K error: boom\r   Compiling a\nerror: failed\nBuilding [=>] 3/9\rnote: x\n";
+        let mut out = Vec::new();
+        let kept = tee_stderr(text.as_bytes(), &mut out);
+        assert_eq!(out, text.as_bytes());
+        assert_eq!(kept, "error: failed\nnote: x\n");
+    }
 
     fn assets() -> Assets {
         Assets {
