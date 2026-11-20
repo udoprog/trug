@@ -163,8 +163,6 @@ trug's output differs from trunk's:
   `TrunkApplicationStarted` event.
 - The wasm is named `<name>_bg-HASH.wasm`, where trunk writes `<name>-HASH_bg.wasm`.
 - There is no `.trunk-lock`.
-- A proxy forwards `Origin` unchanged, as trunk does; set `change_origin = true`
-  on a `[[proxy]]` whose backend rejects the dev server's origin.
 
 <br>
 
@@ -198,7 +196,6 @@ debounce_ms = 200       # default
 backend = "http://127.0.0.1:3000/api"
 rewrite = "/api"        # optional; the prefix served by trug that the backend path replaces
 no_redirect = false     # hand backend redirects to the client
-change_origin = false   # rewrite the Origin header to the backend's origin
 ```
 
 <br>
@@ -305,10 +302,6 @@ ws = true
   is set.
 - `rewrite`: the prefix trug serves, replaced by the backend's path.
 - `no_redirect`: hand backend redirects to the client instead of following them.
-- `change_origin`: rewrite a request's `Origin` header, when it has one, to the
-  backend's origin (`http://host:port`; `ws://` backends give `http://`), for
-  backends that check `Origin` against `Host`. Off by default, so `Origin` is
-  forwarded as is. Applies to the WebSocket handshake too.
 - `ws`: proxy WebSocket connections. `backend` must be a `ws://` URL (no
   TLS); the client is upgraded once the backend accepts, and text, binary,
   ping, pong and close frames are piped both ways. The client's request
