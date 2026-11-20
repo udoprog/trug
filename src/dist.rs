@@ -23,6 +23,47 @@ fn sibling(dist: &Path, kind: &str) -> PathBuf {
     ))
 }
 
+/// Removes `dist` and the staging and old directories beside it; returns what was removed.
+pub fn clean(dist: &Path) -> io::Result<Vec<PathBuf>> {
+    let prefix = sibling_prefix(dist);
+    let parent = dist.parent().unwrap_or(Path::new("."));
+    let mut removed = Vec::new();
+    if remove(dist)? {
+        removed.push(dist.to_owned());
+    }
+    let mut siblings = Vec::new();
+    match std::fs::read_dir(parent) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    siblings.push(entry.path());
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    siblings.sort();
+    for path in siblings {
+        if remove(&path)? {
+            removed.push(path);
+        }
+    }
+    Ok(removed)
+}
+
+/// Removes a directory (or a file or symlink) if it exists.
+pub fn remove(path: &Path) -> io::Result<bool> {
+    let result = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    result.map(|()| true)
+}
+
 impl Staging {
     /// Removes staging directories left by earlier runs and makes a fresh one.
     pub fn create(dist: &Path) -> io::Result<Self> {
@@ -134,6 +175,34 @@ mod tests {
         assert!(!dist.join("old.txt").exists());
         let leftovers: Vec<_> = std::fs::read_dir(&root).unwrap().collect();
         assert_eq!(leftovers.len(), 1);
+    }
+
+    #[test]
+    fn clean_removes_dist_and_trug_siblings_only() {
+        let root = temp("clean");
+        let dist = root.join("dist");
+        for name in [
+            "dist",
+            ".dist.trug-staging-1",
+            ".dist.trug-old-2",
+            "other",
+            ".other.trug-staging-1",
+        ] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("f"), "x").unwrap();
+        }
+        let removed = clean(&dist).unwrap();
+        assert_eq!(removed.len(), 3);
+        assert!(!dist.exists());
+        assert!(root.join("other").exists());
+        assert!(root.join(".other.trug-staging-1").exists());
+        assert!(clean(&dist).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clean_of_missing_parent_is_empty() {
+        let root = temp("clean-missing");
+        assert!(clean(&root.join("nope/dist")).unwrap().is_empty());
     }
 
     #[test]

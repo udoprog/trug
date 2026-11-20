@@ -201,6 +201,7 @@
 //! ```shell
 //! trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/]
 //! trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
+//! trug clean [-c Trug.toml] [-d DIR] [--cargo [--manifest-path Cargo.toml]] [--tools]
 //! trug update
 //! ```
 //!
@@ -222,6 +223,12 @@
 //! (sizes plain and gzipped), whether wasm-opt ran and the total time. A failed
 //! step is named, with the command that failed. From Rust, nothing is printed
 //! unless `BuildRequest::reporter` (or `CssRequest::reporter`) is set.
+//!
+//! `trug clean` removes `dist` (found as `trug build` does) and the staging
+//! directories a build leaves beside it; a missing `dist` is not an error. `--cargo`
+//! also runs `cargo clean` and `--tools` also removes the cache of downloaded tools
+//! (`$TRUG_CACHE_DIR`, else `$XDG_CACHE_HOME/trug`, else `~/.cache/trug`). Nothing
+//! else is removed.
 //!
 //! `trug update` replaces the running binary with the latest GitHub release of
 //! `udoprog/trug` for this platform, or says it is already up to date.

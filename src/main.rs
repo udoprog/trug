@@ -97,6 +97,24 @@ enum Command {
         #[command(flatten)]
         cargo: CargoArgs,
     },
+    /// Remove dist and trug's leftover staging directories; optionally also cargo's target and trug's tool cache.
+    Clean {
+        /// The Trug.toml to find dist with, as for `build`.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// The output directory, relative to the current directory; overrides `[build] dist`.
+        #[arg(short, long)]
+        dist: Option<PathBuf>,
+        /// Also run `cargo clean` for the app.
+        #[arg(long)]
+        cargo: bool,
+        /// With `--cargo`: the app's Cargo.toml.
+        #[arg(long, requires = "cargo")]
+        manifest_path: Option<PathBuf>,
+        /// Also remove trug's cache of downloaded tools.
+        #[arg(long)]
+        tools: bool,
+    },
     /// Update trug to the latest GitHub release.
     Update,
     /// List the crates that ship styles, with their enabled features.
@@ -287,6 +305,49 @@ fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Err
                 Ok::<_, Box<dyn std::error::Error>>(())
             })?;
         }
+        Command::Clean {
+            config,
+            dist,
+            cargo,
+            manifest_path,
+            tools,
+        } => {
+            let (config, root) = load_config(config, dist)?;
+            let dist = config.paths(&root).dist;
+            if let Ok(canonical) = dist.canonicalize() {
+                let cwd = std::env::current_dir()?.canonicalize()?;
+                if root.canonicalize()?.starts_with(&canonical) || cwd.starts_with(&canonical) {
+                    return Err(format!(
+                        "refusing to remove {}: it contains the project",
+                        dist.display()
+                    )
+                    .into());
+                }
+            }
+            for path in trug::dist::clean(&dist)? {
+                term.status("Removed", &shown_path(&root, &path));
+            }
+            if cargo {
+                let mut command = std::process::Command::new("cargo");
+                command.arg("clean");
+                if let Some(manifest_path) = manifest_path {
+                    command.arg("--manifest-path").arg(manifest_path);
+                }
+                if quiet {
+                    command.arg("--quiet");
+                }
+                let status = command.status()?;
+                if !status.success() {
+                    return Err(format!("`cargo clean` failed: {status}").into());
+                }
+            }
+            if tools {
+                let cache = trug::build::cache_dir();
+                if trug::dist::remove(&cache)? {
+                    term.status("Removed", &cache.display().to_string());
+                }
+            }
+        }
         Command::Update => trug::update::update(&term.reporter())?,
         Command::Packages { cargo } => {
             for package in Query::from(cargo).packages()? {
@@ -408,6 +469,12 @@ mod tests {
             panic!("expected serve");
         };
         assert_eq!(ignore, ["a/**", "*.wgsl"]);
+    }
+
+    #[test]
+    fn clean_manifest_path_needs_cargo() {
+        assert!(Cli::try_parse_from(["trug", "clean", "--manifest-path", "a"]).is_err());
+        assert!(Cli::try_parse_from(["trug", "clean", "--cargo", "--tools", "-d", "out"]).is_ok());
     }
 
     #[test]
