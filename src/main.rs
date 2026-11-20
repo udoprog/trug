@@ -1,7 +1,12 @@
+mod term;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use term::Term;
 use trug::{CssRequest, OutputStyle, Query};
 
 #[derive(Parser)]
@@ -10,6 +15,15 @@ use trug::{CssRequest, OutputStyle, Query};
     about = "Builds an app's CSS from its Sass and the Sass its crates ship"
 )]
 struct Cli {
+    /// When to colour output; `auto` colours a terminal unless `NO_COLOR` is set.
+    #[arg(long, value_enum, default_value_t = term::Color::Auto, global = true)]
+    color: term::Color,
+    /// Print only warnings and errors.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
+    /// Also print the commands trug runs and the tools it uses.
+    #[arg(short, long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -52,9 +66,6 @@ enum Command {
         /// (default `/`).
         #[arg(long)]
         public_url: Option<String>,
-        /// Print each step's time.
-        #[arg(short, long)]
-        verbose: bool,
         #[command(flatten)]
         cargo: CargoArgs,
     },
@@ -77,8 +88,6 @@ enum Command {
         jobs: Option<u32>,
         #[arg(long)]
         public_url: Option<String>,
-        #[arg(short, long)]
-        verbose: bool,
         /// Address to listen on; repeatable. Overrides `[serve] addresses`.
         #[arg(long = "address")]
         addresses: Vec<String>,
@@ -137,17 +146,21 @@ impl From<CargoArgs> for Query {
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let options = term::Options::stderr(cli.color, cli.quiet, cli.verbose);
+    let term = Term::new(Box::new(std::io::stderr()), options);
+    match run(cli.command, &term) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("trug: {error}");
+            term.error(&error.to_string());
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    match cli.command {
+fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Error>> {
+    let quiet = term.options().quiet;
+    match command {
         Command::Css {
             entry,
             out,
@@ -166,6 +179,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 load_paths,
                 style,
                 source_map: embed_source_map,
+                reporter: term.reporter(),
             })?;
             match out {
                 Some(out) => trug::write_atomic(&out, &css)?,
@@ -178,10 +192,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             release,
             jobs,
             public_url,
-            verbose,
             cargo,
         } => {
             let (config, root) = load_config(config, dist)?;
+            let start = Instant::now();
             let report = trug::build::build(&trug::build::BuildRequest {
                 config,
                 root,
@@ -189,9 +203,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 release,
                 jobs,
                 public_url,
-                verbose,
+                quiet,
+                reporter: term.reporter(),
             })?;
-            eprintln!("trug: built {}", report.dist.display());
+            term.finished(&report, release, start.elapsed(), true);
         }
         Command::Serve {
             config,
@@ -199,7 +214,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             release,
             jobs,
             public_url,
-            verbose,
             addresses,
             port,
             no_watch,
@@ -217,10 +231,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 release,
                 jobs,
                 public_url,
-                verbose,
+                quiet,
+                reporter: term.reporter(),
             };
+            let start = Instant::now();
             let report = trug::build::build(&request)?;
-            eprintln!("trug: built {}", report.dist.display());
+            term.finished(&report, release, start.elapsed(), true);
             let addresses = if addresses.is_empty() {
                 serve.addresses.unwrap_or_else(|| vec!["127.0.0.1".into()])
             } else {
@@ -236,12 +252,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let _watcher = if no_watch {
                 None
             } else {
-                Some(start_watch(request, ignore, site.clone())?)
+                Some(start_watch(request, ignore, site.clone(), term.clone())?)
             };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listeners = trug::serve::bind(&addresses, port).await?;
                 for listener in &listeners {
-                    eprintln!("trug: serving on http://{}", listener.local_addr()?);
+                    term.status("Serving", &format!("http://{}", listener.local_addr()?));
                 }
                 tokio::select! {
                     result = site.serve(listeners) => result?,
@@ -291,6 +307,7 @@ fn start_watch(
     request: trug::build::BuildRequest,
     ignore: Vec<String>,
     site: trug::serve::Site,
+    term: Arc<Term>,
 ) -> Result<trug::watch::Watcher, Box<dyn std::error::Error>> {
     let root = request.root.clone();
     let mut settings = request.config.watch.clone();
@@ -309,7 +326,7 @@ fn start_watch(
             watch.extend(packages.into_iter().map(|p| p.dir));
             ignored.push(target);
         }
-        Err(error) => eprintln!("trug: not watching package styles: {error}"),
+        Err(error) => term.warning(&format!("not watching package styles: {error}")),
     }
     watch.retain(|path| path.exists());
     watch.sort();
@@ -324,11 +341,13 @@ fn start_watch(
             paths: watch,
             ignore,
             debounce,
+            reporter: term.reporter(),
         },
         move || {
-            eprintln!("trug: change detected, rebuilding");
+            term.status("Rebuilding", "after a change");
+            let start = Instant::now();
             trug::build::build(&request)
-                .map(|report| eprintln!("trug: built {}", report.dist.display()))
+                .map(|report| term.finished(&report, request.release, start.elapsed(), false))
         },
         move || site.notify_reload(),
     )?;
@@ -347,5 +366,14 @@ mod tests {
             panic!("expected serve");
         };
         assert_eq!(ignore, ["a/**", "*.wgsl"]);
+    }
+
+    #[test]
+    fn output_flags_are_global() {
+        let cli = Cli::try_parse_from(["trug", "build", "-v", "--color", "never"]).unwrap();
+        assert!(cli.verbose && !cli.quiet && cli.color == term::Color::Never);
+        let cli = Cli::try_parse_from(["trug", "-q", "serve"]).unwrap();
+        assert!(cli.quiet);
+        assert!(Cli::try_parse_from(["trug", "build", "-q", "-v"]).is_err());
     }
 }

@@ -199,16 +199,29 @@
 //! ### Commands
 //!
 //! ```shell
-//! trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/] [-v]
+//! trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/]
 //! trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
 //! trug update
 //! ```
 //!
 //! `trug build` takes the app's cargo flags (`--manifest-path`, `--target`, `-F`,
-//! `--all-features`, `--no-default-features`, `--locked`, `--offline`); `-v` prints
-//! each step's time. `--public-url` overrides the `<base data-trug-public-url>` href
+//! `--all-features`, `--no-default-features`, `--locked`, `--offline`).
+//! `--public-url` overrides the `<base data-trug-public-url>` href
 //! and defaults to `/`. `-d`/`--dist DIR` overrides `[build] dist` with a path
 //! relative to the current directory; it is still replaced only on success.
+//!
+//! Every command takes the output flags:
+//!
+//! - `--color auto|always|never`: `auto` (the default) colours a terminal unless
+//!   `NO_COLOR` is set.
+//! - `-q`/`--quiet`: only warnings and errors; cargo runs with `--quiet`.
+//! - `-v`/`--verbose`: also the commands trug runs and the tools it uses.
+//!
+//! A build prints a line with its time as each step finishes; on a terminal a
+//! status line shows the running step. It ends with the files written to `dist`
+//! (sizes plain and gzipped), whether wasm-opt ran and the total time. A failed
+//! step is named, with the command that failed. From Rust, nothing is printed
+//! unless `BuildRequest::reporter` (or `CssRequest::reporter`) is set.
 //!
 //! `trug update` replaces the running binary with the latest GitHub release of
 //! `udoprog/trug` for this platform, or says it is already up to date.
@@ -299,6 +312,7 @@ pub mod html;
 pub mod importer;
 pub mod packages;
 pub mod proxy;
+pub mod report;
 pub mod serve;
 mod tools;
 pub mod update;
@@ -312,6 +326,7 @@ use base64::Engine as _;
 
 pub use importer::PackageImporter;
 pub use packages::{Query, StylePackage};
+pub use report::{Event, Reporter};
 pub use sasso::OutputStyle;
 
 #[derive(Debug)]
@@ -325,7 +340,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Packages(error) => error.fmt(f),
-            Error::Sass(error) => error.fmt(f),
+            Error::Sass(error) => {
+                let text = error.to_string();
+                f.write_str(text.strip_prefix("Error: ").unwrap_or(&text))
+            }
             Error::Io(path, error) => write!(f, "{}: {error}", path.display()),
         }
     }
@@ -349,6 +367,8 @@ pub struct CssRequest {
     pub style: OutputStyle,
     /// Append an inline source map, with the sources embedded.
     pub source_map: bool,
+    /// Gets Sass warnings and `@debug` output; silent by default.
+    pub reporter: Reporter,
 }
 
 impl CssRequest {
@@ -359,6 +379,7 @@ impl CssRequest {
             load_paths: Vec::new(),
             style: OutputStyle::Expanded,
             source_map: false,
+            reporter: Reporter::default(),
         }
     }
 }
@@ -373,16 +394,19 @@ pub fn build_css(request: &CssRequest) -> Result<String, Error> {
         request.load_paths.clone(),
         request.style,
         request.source_map,
+        &request.reporter,
     )
 }
 
-/// Compiles the stylesheet at `entry` with `packages` available as `pkg:` URLs.
+/// Compiles the stylesheet at `entry` with `packages` available as `pkg:` URLs; warnings and
+/// `@debug` output go to `reporter`.
 pub fn compile(
     entry: &Path,
     packages: Vec<StylePackage>,
     load_paths: Vec<PathBuf>,
     style: OutputStyle,
     source_map: bool,
+    reporter: &Reporter,
 ) -> Result<String, Error> {
     let entry = std::path::absolute(entry).map_err(|e| Error::Io(entry.to_owned(), e))?;
     let source = std::fs::read_to_string(&entry).map_err(|e| Error::Io(entry.clone(), e))?;
@@ -391,7 +415,8 @@ pub fn compile(
     let options = sasso::Options::new()
         .with_importer(&importer)
         .with_url(&url)
-        .with_style(style);
+        .with_style(style)
+        .with_warn_handler(warn_handler(reporter.clone()));
     if !source_map {
         return sasso::compile(&source, &options).map_err(Error::Sass);
     }
@@ -406,6 +431,16 @@ pub fn compile(
         "/*# sourceMappingURL=data:application/json;charset=utf-8;base64,{map} */\n"
     ));
     Ok(css)
+}
+
+fn warn_handler(reporter: Reporter) -> sasso::WarnHandler {
+    std::rc::Rc::new(move |event: &sasso::WarnEvent<'_>| {
+        let text = event.formatted.trim_end();
+        reporter.emit(&match event.kind {
+            sasso::WarnKind::Warn => Event::Warning(text),
+            sasso::WarnKind::Debug => Event::Debug(text),
+        });
+    })
 }
 
 /// Writes `contents` to `path` through a temporary file beside it, so a reader

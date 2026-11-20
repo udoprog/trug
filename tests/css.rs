@@ -210,3 +210,53 @@ fn source_map_is_embedded_on_request() {
         "{css}"
     );
 }
+
+const SILENT_CHILD: &str = "TRUG_TEST_SILENT_CHILD";
+
+#[test]
+fn library_is_silent_without_a_reporter() {
+    if std::env::var_os(SILENT_CHILD).is_some() {
+        build(
+            "@warn \"careful\";\n@debug \"look\";\na { b: c }",
+            "silent-child",
+        )
+        .unwrap();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "library_is_silent_without_a_reporter",
+            "--nocapture",
+        ])
+        .env(SILENT_CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("careful") && !stderr.contains("look"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn warnings_go_to_the_reporter() {
+    use std::sync::{Arc, Mutex};
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut request = request("@warn \"careful\";\n@debug \"look\";", "reporter");
+    let seen = events.clone();
+    request.reporter = trug::Reporter::new(move |event| {
+        let text = match event {
+            trug::Event::Warning(text) => format!("warning {text}"),
+            trug::Event::Debug(text) => format!("debug {text}"),
+            other => format!("{other:?}"),
+        };
+        seen.lock().unwrap().push(text);
+    });
+    trug::build_css(&request).unwrap();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events[0].starts_with("warning ") && events[0].contains("careful"));
+    assert!(events[1].starts_with("debug ") && events[1].contains("look"));
+}

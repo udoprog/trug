@@ -15,6 +15,7 @@ use crate::config::{Config, Hook, Paths, Stage};
 use crate::dist::Staging;
 use crate::html::{self, Directive};
 use crate::packages::Query;
+use crate::report::{Event, Reporter, command_line};
 
 pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
@@ -62,7 +63,10 @@ pub struct BuildRequest {
     pub jobs: Option<u32>,
     /// Prefix of every URL in the output html; overrides the document's base tag.
     pub public_url: Option<String>,
-    pub verbose: bool,
+    /// Passes `--quiet` to cargo.
+    pub quiet: bool,
+    /// Gets the build's progress; silent by default.
+    pub reporter: Reporter,
 }
 
 #[derive(Debug, Default)]
@@ -70,26 +74,72 @@ pub struct Report {
     pub steps: Vec<(&'static str, Duration)>,
     pub dist: PathBuf,
     pub public_url: String,
+    /// What the build wrote to dist, in the order it was written.
+    pub files: Vec<Output>,
+    /// Whether wasm-opt ran.
+    pub wasm_opt: WasmOpt,
+    /// The wasm's size before wasm-opt, when it ran.
+    pub wasm_unoptimized: Option<u64>,
+}
+
+/// A file or directory the build wrote to dist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output {
+    pub kind: OutputKind,
+    /// Relative to dist.
+    pub path: PathBuf,
+    /// In bytes; the sum of its files for a directory.
+    pub size: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputKind {
+    Html,
+    Wasm,
+    Js,
+    Style,
+    Icon,
+    /// A copied directory with this many files.
+    Assets(usize),
+}
+
+/// Whether and why wasm-opt ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WasmOpt {
+    /// Dev builds never run it.
+    #[default]
+    DevBuild,
+    /// `[build] wasm_opt = false`.
+    Disabled,
+    /// No wasm-opt could be found or downloaded.
+    Missing,
+    Ran,
+    /// This wasm was optimized by an earlier build.
+    Cached,
 }
 
 struct Timer<'a> {
     report: &'a mut Report,
-    verbose: bool,
+    reporter: &'a Reporter,
 }
 
 impl Timer<'_> {
     fn step<T>(
         &mut self,
-        name: &'static str,
+        step: &'static str,
+        child_output: bool,
         f: impl FnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.reporter
+            .emit(&Event::StepStarted { step, child_output });
         let start = Instant::now();
         let result = f();
         let took = start.elapsed();
-        if self.verbose {
-            eprintln!("trug: {name}: {:.2}s", took.as_secs_f64());
-        }
-        self.report.steps.push((name, took));
+        self.reporter.emit(&match result {
+            Ok(_) => Event::StepFinished { step, took },
+            Err(_) => Event::StepFailed { step, took },
+        });
+        self.report.steps.push((step, took));
         result
     }
 }
@@ -100,9 +150,10 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
         dist: paths.dist.clone(),
         ..Report::default()
     };
+    let reporter = &request.reporter;
     let mut timer = Timer {
         report: &mut report,
-        verbose: request.verbose,
+        reporter,
     };
     let html =
         std::fs::read_to_string(&paths.target).map_err(|e| Error::Io(paths.target.clone(), e))?;
@@ -120,38 +171,60 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
 
     let staging = Staging::create(&paths.dist).map_err(|e| Error::Io(paths.dist.clone(), e))?;
 
-    timer.step("hooks", || {
-        for hook in &request.config.hooks {
-            run_hook(hook, &paths, staging.path())?;
-        }
-        Ok(())
-    })?;
+    if !request.config.hooks.is_empty() {
+        timer.step("hooks", true, || {
+            for hook in &request.config.hooks {
+                run_hook(hook, &paths, staging.path(), reporter)?;
+            }
+            Ok(())
+        })?;
+    }
 
     let mut query = request.query.clone();
     query.manifest_path = Some(plan.manifest.clone());
     query.target = Some(WASM_TARGET.to_owned());
 
-    let links = timer.step("styles", || {
-        stage_styles(
-            &plan.styles,
-            &query,
-            staging.path(),
-            &public_url,
-            !request.release,
-        )
-    })?;
+    let mut files = Vec::new();
+    let links = if plan.styles.is_empty() {
+        HashMap::new()
+    } else {
+        timer.step("styles", false, || {
+            stage_styles(
+                &plan.styles,
+                &query,
+                staging.path(),
+                &public_url,
+                !request.release,
+                reporter,
+                &mut files,
+            )
+        })?
+    };
 
-    let wasm = timer.step("cargo", || cargo_build(&query, request))?;
+    let wasm = timer.step("cargo", true, || cargo_build(&query, request))?;
     let metadata = query.metadata()?;
-    let mut bindgen = timer.step("wasm-bindgen", || run_bindgen(&metadata, &wasm))?;
-    if request.release && request.config.build.wasm_opt != Some(false) {
-        timer.step("wasm-opt", || bindgen.optimize(crate::tools::wasm_opt))?;
+    let mut bindgen = timer.step("wasm-bindgen", false, || {
+        run_bindgen(&metadata, &wasm, reporter)
+    })?;
+    if !request.release {
+        timer.report.wasm_opt = WasmOpt::DevBuild;
+    } else if request.config.build.wasm_opt == Some(false) {
+        timer.report.wasm_opt = WasmOpt::Disabled;
+    } else {
+        let before = std::fs::metadata(bindgen.dir.join(&bindgen.wasm)).map(|m| m.len());
+        let ran = timer.step("wasm-opt", false, || {
+            bindgen.optimize(|| crate::tools::wasm_opt(reporter), reporter)
+        })?;
+        if matches!(ran, WasmOpt::Ran | WasmOpt::Cached) {
+            timer.report.wasm_unoptimized = before.ok();
+        }
+        timer.report.wasm_opt = ran;
     }
 
-    timer.step("output", || {
-        let assets = bindgen.stage(staging.path())?;
+    timer.step("output", false, || {
+        let assets = bindgen.stage(staging.path(), &mut files)?;
         let mut links = links;
-        links.extend(plan.stage_statics(staging.path(), &public_url, &directives)?);
+        links.extend(plan.stage_statics(staging.path(), &public_url, &directives, &mut files)?);
         let mut extra = Vec::new();
         if let Some(base) = &base {
             let tag = html::tag(
@@ -172,12 +245,18 @@ pub fn build(request: &BuildRequest) -> Result<Report, Error> {
             extra,
         );
         let index = staging.path().join("index.html");
+        files.push(Output {
+            kind: OutputKind::Html,
+            path: "index.html".into(),
+            size: out.len() as u64,
+        });
         std::fs::write(&index, out).map_err(|e| Error::Io(index, e))
     })?;
 
-    timer.step("swap", || {
+    timer.step("swap", false, || {
         staging.swap().map_err(|e| Error::Io(paths.dist.clone(), e))
     })?;
+    report.files = files;
     Ok(report)
 }
 
@@ -218,11 +297,19 @@ impl Plan {
         staging: &Path,
         public_url: &str,
         directives: &[Directive],
+        files: &mut Vec<Output>,
     ) -> Result<HashMap<usize, String>, Error> {
         let mut links = HashMap::new();
         for (at, item) in &self.statics {
             match item {
-                Static::CopyDir { from, to } => copy_dir(from, &staging.join(to))?,
+                Static::CopyDir { from, to } => {
+                    let (count, size) = copy_dir(from, &staging.join(to))?;
+                    files.push(Output {
+                        kind: OutputKind::Assets(count),
+                        path: to.clone(),
+                        size,
+                    });
+                }
                 Static::Icon { from } => {
                     let bytes = std::fs::read(from).map_err(|e| Error::Io(from.clone(), e))?;
                     let stem = from
@@ -235,6 +322,11 @@ impl Plan {
                         .unwrap_or_default();
                     let name = hashed_name(&stem, &ext, &bytes);
                     let to = staging.join(&name);
+                    files.push(Output {
+                        kind: OutputKind::Icon,
+                        path: name.clone().into(),
+                        size: bytes.len() as u64,
+                    });
                     std::fs::write(&to, bytes).map_err(|e| Error::Io(to, e))?;
                     let directive = &directives[*at];
                     let tag = html::tag(
@@ -251,19 +343,24 @@ impl Plan {
     }
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), Error> {
+/// Copies `from` into `to`; returns how many files and bytes it copied.
+fn copy_dir(from: &Path, to: &Path) -> Result<(usize, u64), Error> {
     std::fs::create_dir_all(to).map_err(|e| Error::Io(to.to_owned(), e))?;
     let entries = std::fs::read_dir(from).map_err(|e| Error::Io(from.to_owned(), e))?;
+    let (mut count, mut size) = (0, 0);
     for entry in entries {
         let entry = entry.map_err(|e| Error::Io(from.to_owned(), e))?;
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
-            copy_dir(&entry.path(), &target)?;
+            let (c, s) = copy_dir(&entry.path(), &target)?;
+            count += c;
+            size += s;
         } else {
-            std::fs::copy(entry.path(), &target).map_err(|e| Error::Io(entry.path(), e))?;
+            size += std::fs::copy(entry.path(), &target).map_err(|e| Error::Io(entry.path(), e))?;
+            count += 1;
         }
     }
-    Ok(())
+    Ok((count, size))
 }
 
 fn relative_target(path: &str) -> Result<PathBuf, Error> {
@@ -366,6 +463,8 @@ fn stage_styles(
     staging: &Path,
     public_url: &str,
     source_map: bool,
+    reporter: &Reporter,
+    files: &mut Vec<Output>,
 ) -> Result<HashMap<usize, String>, Error> {
     let mut links = HashMap::new();
     for style in styles {
@@ -373,6 +472,7 @@ fn stage_styles(
             let mut css = crate::CssRequest::new(&style.path);
             css.query = query.clone();
             css.source_map = source_map;
+            css.reporter = reporter.clone();
             crate::build_css(&css)
                 .map_err(|e| Error::Css(format!("{}: {e}", style.path.display())))?
         } else {
@@ -385,6 +485,11 @@ fn stage_styles(
             .unwrap_or_default();
         let name = hashed_name(&stem, "css", contents.as_bytes());
         let to = staging.join(&name);
+        files.push(Output {
+            kind: OutputKind::Style,
+            path: name.clone().into(),
+            size: contents.len() as u64,
+        });
         std::fs::write(&to, contents).map_err(|e| Error::Io(to, e))?;
         links.insert(
             style.at,
@@ -394,24 +499,24 @@ fn stage_styles(
     Ok(links)
 }
 
-fn run_hook(hook: &Hook, paths: &Paths, staging: &Path) -> Result<(), Error> {
+fn run_hook(hook: &Hook, paths: &Paths, staging: &Path, reporter: &Reporter) -> Result<(), Error> {
     match hook.stage {
         Stage::PreBuild => {}
     }
-    let status = Command::new(&hook.command)
-        .args(&hook.command_arguments)
+    let mut command = Command::new(&hook.command);
+    command.args(&hook.command_arguments);
+    let line = command_line(&command);
+    reporter.emit(&Event::Command(&line));
+    let status = command
         .current_dir(&paths.root)
         .env("TRUG_STAGING_DIR", staging)
         .stdin(Stdio::null())
         .status()
-        .map_err(|e| Error::Hook(format!("hook {}: {e}", hook.command)))?;
+        .map_err(|e| Error::Hook(format!("hook `{line}`: {e}")))?;
     if status.success() {
         Ok(())
     } else {
-        Err(Error::Hook(format!(
-            "hook {} failed: {status}",
-            hook.command
-        )))
+        Err(Error::Hook(format!("hook `{line}` failed: {status}")))
     }
 }
 
@@ -441,16 +546,19 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
         (query.no_default_features, "--no-default-features"),
         (query.locked, "--locked"),
         (query.offline, "--offline"),
+        (request.quiet, "--quiet"),
     ] {
         if on {
             command.arg(flag);
         }
     }
+    let line = command_line(&command);
+    request.reporter.emit(&Event::Command(&line));
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::Cargo(format!("cargo: {e}")))?;
+        .map_err(|e| Error::Cargo(format!("`{line}`: {e}")))?;
     let stdout = io::BufReader::new(child.stdout.take().expect("piped"));
     let wanted = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
     let mut wasm = None;
@@ -477,7 +585,7 @@ fn cargo_build(query: &Query, request: &BuildRequest) -> Result<PathBuf, Error> 
         .wait()
         .map_err(|e| Error::Cargo(format!("cargo: {e}")))?;
     if !status.success() {
-        return Err(Error::Cargo(format!("cargo build failed: {status}")));
+        return Err(Error::Cargo(format!("`{line}` failed: {status}")));
     }
     wasm.ok_or_else(|| {
         Error::Cargo(format!(
@@ -513,54 +621,86 @@ impl Bindgen {
 
     /// Runs `wasm-opt -Oz` from `find` into a file cached beside the bindgen output; stages the
     /// unoptimized wasm when `find` has none.
-    fn optimize(&mut self, find: impl FnOnce() -> Option<PathBuf>) -> Result<(), Error> {
+    fn optimize(
+        &mut self,
+        find: impl FnOnce() -> Option<PathBuf>,
+        reporter: &Reporter,
+    ) -> Result<WasmOpt, Error> {
         let optimized = format!("{}_bg.opt.wasm", self.name);
         let out = self.dir.join(&optimized);
-        if !out.exists() {
+        let ran = if out.exists() {
+            WasmOpt::Cached
+        } else {
             let Some(wasm_opt) = find() else {
-                return Ok(());
+                return Ok(WasmOpt::Missing);
             };
             let tmp = out.with_extension(format!("tmp{}", std::process::id()));
-            let status = Command::new(&wasm_opt)
+            let mut command = Command::new(&wasm_opt);
+            command
                 .arg("-Oz")
                 .args(WASM_OPT_FEATURES)
                 .arg(self.dir.join(&self.wasm))
                 .arg("-o")
-                .arg(&tmp)
+                .arg(&tmp);
+            let line = command_line(&command);
+            reporter.emit(&Event::Command(&line));
+            let status = command
                 .stdin(Stdio::null())
                 .status()
-                .map_err(|e| Error::Bindgen(format!("wasm-opt: {e}")))?;
+                .map_err(|e| Error::Bindgen(format!("`{line}`: {e}")))?;
             if !status.success() {
                 let _ = std::fs::remove_file(&tmp);
-                return Err(Error::Bindgen(format!("wasm-opt failed: {status}")));
+                return Err(Error::Bindgen(format!("`{line}` failed: {status}")));
             }
             std::fs::rename(&tmp, &out).map_err(|e| Error::Io(out.clone(), e))?;
-        }
+            WasmOpt::Ran
+        };
         self.wasm = optimized;
-        Ok(())
+        Ok(ran)
     }
 
-    fn stage(&self, staging: &Path) -> Result<Assets, Error> {
-        let copy = |file: String, stem: &str, ext: &str| -> Result<String, Error> {
+    fn stage(&self, staging: &Path, files: &mut Vec<Output>) -> Result<Assets, Error> {
+        let mut copy = |file: String, stem: &str, ext: &str, kind| -> Result<String, Error> {
             let from = self.dir.join(&file);
             let bytes = std::fs::read(&from).map_err(|e| Error::Io(from.clone(), e))?;
             let name = hashed_name(stem, ext, &bytes);
             let to = staging.join(&name);
+            files.push(Output {
+                kind,
+                path: name.clone().into(),
+                size: bytes.len() as u64,
+            });
             std::fs::write(&to, bytes).map_err(|e| Error::Io(to, e))?;
             Ok(name)
         };
+        let assets = Assets {
+            wasm: copy(
+                self.wasm.clone(),
+                &format!("{}_bg", self.name),
+                "wasm",
+                OutputKind::Wasm,
+            )?,
+            js: copy(
+                format!("{}.js", self.name),
+                &self.name,
+                "js",
+                OutputKind::Js,
+            )?,
+        };
         let snippets = self.dir.join("snippets");
         if snippets.is_dir() {
-            copy_dir(&snippets, &staging.join("snippets"))?;
+            let (count, size) = copy_dir(&snippets, &staging.join("snippets"))?;
+            files.push(Output {
+                kind: OutputKind::Assets(count),
+                path: "snippets".into(),
+                size,
+            });
         }
-        Ok(Assets {
-            js: copy(format!("{}.js", self.name), &self.name, "js")?,
-            wasm: copy(self.wasm.clone(), &format!("{}_bg", self.name), "wasm")?,
-        })
+        Ok(assets)
     }
 }
 
-fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
+fn run_bindgen(metadata: &Metadata, wasm: &Path, reporter: &Reporter) -> Result<Bindgen, Error> {
     let version = metadata
         .packages
         .iter()
@@ -584,11 +724,12 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
     if dir.join(format!("{name}.js")).exists() && dir.join(format!("{name}_bg.wasm")).exists() {
         return Ok(Bindgen::new(dir, name));
     }
-    let binary = crate::tools::wasm_bindgen(&version).map_err(Error::Bindgen)?;
+    let binary = crate::tools::wasm_bindgen(&version, reporter).map_err(Error::Bindgen)?;
     let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| Error::Io(tmp.clone(), e))?;
-    let status = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    command
         .args([
             "--target",
             "web",
@@ -598,13 +739,16 @@ fn run_bindgen(metadata: &Metadata, wasm: &Path) -> Result<Bindgen, Error> {
             "--out-dir",
         ])
         .arg(&tmp)
-        .arg(wasm)
+        .arg(wasm);
+    let line = command_line(&command);
+    reporter.emit(&Event::Command(&line));
+    let status = command
         .stdin(Stdio::null())
         .status()
-        .map_err(|e| Error::Bindgen(format!("{}: {e}", binary.display())))?;
+        .map_err(|e| Error::Bindgen(format!("`{line}`: {e}")))?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(Error::Bindgen(format!("wasm-bindgen failed: {status}")));
+        return Err(Error::Bindgen(format!("`{line}` failed: {status}")));
     }
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::rename(&tmp, &dir).map_err(|e| Error::Io(dir.clone(), e))?;
@@ -759,7 +903,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
         let mut bindgen = Bindgen::new(tmp.clone(), "app".into());
-        bindgen.optimize(|| None).unwrap();
+        let silent = Reporter::default();
+        assert_eq!(
+            bindgen.optimize(|| None, &silent).unwrap(),
+            WasmOpt::Missing
+        );
         assert_eq!(bindgen.wasm, "app_bg.wasm");
         #[cfg(unix)]
         {
@@ -771,7 +919,10 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-            bindgen.optimize(|| Some(tool)).unwrap();
+            assert_eq!(
+                bindgen.optimize(|| Some(tool), &silent).unwrap(),
+                WasmOpt::Ran
+            );
             assert_eq!(bindgen.wasm, "app_bg.opt.wasm");
             assert!(tmp.join("app_bg.opt.wasm").exists());
         }
@@ -791,9 +942,19 @@ mod tests {
         let directives = html::directives(html);
         let paths = Config::default().paths(&tmp);
         let plan = Plan::new(&directives, &paths).unwrap();
+        let mut files = Vec::new();
         let links = plan
-            .stage_statics(&tmp.join("out"), "/app/", &directives)
+            .stage_statics(&tmp.join("out"), "/app/", &directives, &mut files)
             .unwrap();
+        let kinds: Vec<_> = files.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                OutputKind::Icon,
+                OutputKind::Assets(2),
+                OutputKind::Assets(2)
+            ]
+        );
         let mut extra = Vec::new();
         let base = html::public_url_base(html).unwrap();
         extra.push((
@@ -862,7 +1023,18 @@ mod tests {
             offline: true,
             ..Query::default()
         };
-        let links = stage_styles(&plan.styles, &query, &staging, "/pub/", false).unwrap();
+        let mut outputs = Vec::new();
+        let links = stage_styles(
+            &plan.styles,
+            &query,
+            &staging,
+            "/pub/",
+            false,
+            &Reporter::default(),
+            &mut outputs,
+        )
+        .unwrap();
+        assert_eq!(outputs.len(), 2);
         let out = render(html, &directives, &plan, &assets(), &links, "/pub/", vec![]);
         let mut files: Vec<_> = std::fs::read_dir(&staging)
             .unwrap()

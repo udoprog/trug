@@ -163,5 +163,5 @@ fn build_swap_and_failures() {
     let second = listing(&dist);
     assert_eq!(second.len(), 3);
     assert_ne!(second, first);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("wasm-bindgen:"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Generating bindings"));
 }

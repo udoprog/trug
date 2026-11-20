@@ -11,6 +11,7 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 
 use crate::build::cache_dir;
+use crate::report::{Event, Reporter, command_line};
 
 /// The binaryen release wasm-opt is downloaded from.
 pub const BINARYEN_VERSION: &str = "version_133";
@@ -52,26 +53,37 @@ fn bindgen_url(version: &str, target: &str) -> String {
 
 /// `wasm-opt` on `PATH`, else the cached binaryen one, else downloaded; `None` after a warning
 /// when none can be had.
-pub fn wasm_opt() -> Option<PathBuf> {
+pub fn wasm_opt(reporter: &Reporter) -> Option<PathBuf> {
     let on_path = PathBuf::from("wasm-opt");
-    if runs(&on_path) {
-        return Some(on_path);
-    }
-    let root = cache_dir().join("binaryen").join(BINARYEN_VERSION);
-    let binary = format!("bin/wasm-opt{EXE_SUFFIX}");
-    match cached_or_install(&root, &binary, install_wasm_opt) {
-        Ok(path) => Some(path),
+    let found = if runs(&on_path) {
+        Ok(on_path)
+    } else {
+        let root = cache_dir().join("binaryen").join(BINARYEN_VERSION);
+        let binary = format!("bin/wasm-opt{EXE_SUFFIX}");
+        cached_or_install(&root, &binary, |root| install_wasm_opt(root, reporter))
+    };
+    match found {
+        Ok(path) => {
+            reporter.emit(&Event::Tool {
+                name: "wasm-opt",
+                path: &path,
+            });
+            Some(path)
+        }
         Err(error) => {
-            eprintln!("trug: {error}; release wasm is not optimized");
+            reporter.emit(&Event::Warning(&format!(
+                "{error}; release wasm is not optimized"
+            )));
             None
         }
     }
 }
 
-fn install_wasm_opt(root: &Path) -> Result<(), String> {
+fn install_wasm_opt(root: &Path, reporter: &Reporter) -> Result<(), String> {
     let platform = binaryen_platform(OS, ARCH)
         .ok_or_else(|| format!("no prebuilt wasm-opt for {OS}-{ARCH}"))?;
-    eprintln!("trug: downloading wasm-opt {BINARYEN_VERSION}");
+    let (name, version) = ("wasm-opt", BINARYEN_VERSION);
+    reporter.emit(&Event::Downloading { name, version });
     let url = binaryen_url(BINARYEN_VERSION, platform);
     install(root, &url, &format!("{url}.sha256"), true, |rel| {
         let name = rel.file_name()?.to_str()?;
@@ -81,7 +93,9 @@ fn install_wasm_opt(root: &Path) -> Result<(), String> {
             rel.starts_with("lib") && (name.ends_with(".dylib") || name.contains(".so"))
         };
         wanted.then(|| rel.to_owned())
-    })
+    })?;
+    reporter.emit(&Event::Downloaded { name, version });
+    Ok(())
 }
 
 /// The path of `binary` under `root`, running `install` first when it is missing. Installs
@@ -103,7 +117,16 @@ fn cached_or_install(
 
 /// wasm-bindgen at exactly `version`: on `PATH`, else cached, else downloaded, else
 /// `cargo install`ed into the cache.
-pub fn wasm_bindgen(version: &str) -> Result<PathBuf, String> {
+pub fn wasm_bindgen(version: &str, reporter: &Reporter) -> Result<PathBuf, String> {
+    let path = find_bindgen(version, reporter)?;
+    reporter.emit(&Event::Tool {
+        name: "wasm-bindgen",
+        path: &path,
+    });
+    Ok(path)
+}
+
+fn find_bindgen(version: &str, reporter: &Reporter) -> Result<PathBuf, String> {
     let on_path = PathBuf::from("wasm-bindgen");
     if has_version(&on_path, version) {
         return Ok(on_path);
@@ -113,35 +136,41 @@ pub fn wasm_bindgen(version: &str) -> Result<PathBuf, String> {
     if has_version(&cached, version) {
         return Ok(cached);
     }
-    match download_bindgen(&root, version) {
+    match download_bindgen(&root, version, reporter) {
         Ok(()) if has_version(&cached, version) => return Ok(cached),
-        Ok(()) => eprintln!("trug: downloaded wasm-bindgen is not version {version}"),
-        Err(error) => eprintln!("trug: {error}"),
+        Ok(()) => reporter.emit(&Event::Warning(&format!(
+            "downloaded wasm-bindgen is not version {version}"
+        ))),
+        Err(error) => reporter.emit(&Event::Warning(&error)),
     }
-    cargo_install_bindgen(&root, version)?;
+    cargo_install_bindgen(&root, version, reporter)?;
     if !has_version(&cached, version) {
         return Err(format!("could not install wasm-bindgen-cli {version}"));
     }
     Ok(cached)
 }
 
-fn download_bindgen(root: &Path, version: &str) -> Result<(), String> {
+fn download_bindgen(root: &Path, version: &str, reporter: &Reporter) -> Result<(), String> {
     let target = bindgen_target(OS, ARCH)
         .ok_or_else(|| format!("no prebuilt wasm-bindgen for {OS}-{ARCH}"))?;
-    eprintln!("trug: downloading wasm-bindgen {version}");
+    let name = "wasm-bindgen";
+    reporter.emit(&Event::Downloading { name, version });
     let url = bindgen_url(version, target);
     let binary = format!("wasm-bindgen{EXE_SUFFIX}");
     install(root, &url, &format!("{url}.sha256sum"), false, |rel| {
         (rel == Path::new(&binary)).then(|| Path::new("bin").join(&binary))
-    })
+    })?;
+    reporter.emit(&Event::Downloaded { name, version });
+    Ok(())
 }
 
-fn cargo_install_bindgen(root: &Path, version: &str) -> Result<(), String> {
-    eprintln!(
-        "trug: installing wasm-bindgen-cli {version} into {}",
-        root.display()
-    );
-    let status = Command::new("cargo")
+fn cargo_install_bindgen(root: &Path, version: &str, reporter: &Reporter) -> Result<(), String> {
+    reporter.emit(&Event::Installing {
+        name: "wasm-bindgen-cli",
+        version,
+    });
+    let mut command = Command::new("cargo");
+    command
         .args([
             "install",
             "wasm-bindgen-cli",
@@ -151,12 +180,15 @@ fn cargo_install_bindgen(root: &Path, version: &str) -> Result<(), String> {
             version,
             "--root",
         ])
-        .arg(root)
+        .arg(root);
+    let line = command_line(&command);
+    reporter.emit(&Event::Command(&line));
+    let status = command
         .stdin(Stdio::null())
         .status()
-        .map_err(|e| format!("cargo install: {e}"))?;
+        .map_err(|e| format!("`{line}`: {e}"))?;
     if !status.success() {
-        return Err(format!("could not install wasm-bindgen-cli {version}"));
+        return Err(format!("`{line}` failed: {status}"));
     }
     Ok(())
 }

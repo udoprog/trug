@@ -12,6 +12,8 @@ use std::time::Duration;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
+use crate::report::{Event, Reporter};
+
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
@@ -136,10 +138,12 @@ fn hash_file(path: &Path) -> Option<u64> {
 
 /// Runs `build` after changes: waits for `debounce` of quiet, builds, and
 /// when changes arrived during the build builds once more. `on_built` fires
-/// after each build that returns `Ok`. Returns when `changes` is closed.
+/// after each build that returns `Ok`; a failed build goes to `reporter`. Returns when `changes`
+/// is closed.
 pub fn rebuild_loop<E: fmt::Display>(
     changes: Receiver<()>,
     debounce: Duration,
+    reporter: &Reporter,
     mut build: impl FnMut() -> Result<(), E>,
     mut on_built: impl FnMut(),
 ) {
@@ -153,7 +157,7 @@ pub fn rebuild_loop<E: fmt::Display>(
         }
         match build() {
             Ok(()) => on_built(),
-            Err(error) => eprintln!("trug: build failed: {error}"),
+            Err(error) => reporter.emit(&Event::BuildFailed(&error.to_string())),
         }
     }
 }
@@ -168,6 +172,8 @@ pub struct WatchRequest {
     pub paths: Vec<PathBuf>,
     pub ignore: Ignore,
     pub debounce: Duration,
+    /// Gets watch errors and failed builds; silent by default.
+    pub reporter: Reporter,
 }
 
 impl Watcher {
@@ -178,6 +184,8 @@ impl Watcher {
     ) -> Result<Self, Error> {
         let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
         let ignore = request.ignore;
+        let reporter = request.reporter;
+        let watch_reporter = reporter.clone();
         let mut contents = Contents::default();
         for path in &request.paths {
             contents.scan(path, &ignore);
@@ -198,13 +206,16 @@ impl Watcher {
                         let _ = tx.send(());
                     }
                 }
-                Err(error) => eprintln!("trug: watch error: {error}"),
+                Err(error) => {
+                    watch_reporter.emit(&Event::Warning(&format!("watch error: {error}")))
+                }
             })?;
         for path in &request.paths {
             watcher.watch(path, RecursiveMode::Recursive)?;
         }
         let debounce = request.debounce;
-        let thread = std::thread::spawn(move || rebuild_loop(rx, debounce, build, on_built));
+        let thread =
+            std::thread::spawn(move || rebuild_loop(rx, debounce, &reporter, build, on_built));
         Ok(Self {
             watcher: Some(watcher),
             thread: Some(thread),
@@ -265,6 +276,7 @@ mod tests {
                 rebuild_loop(
                     rx,
                     Duration::from_millis(30),
+                    &Reporter::default(),
                     move || {
                         *builds.lock().unwrap() += 1;
                         started_tx.send(()).unwrap();
@@ -297,13 +309,21 @@ mod tests {
         tx.send(()).unwrap();
         drop(tx);
         let mut swaps = 0;
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let failed = errors.clone();
         rebuild_loop(
             rx,
             Duration::from_millis(1),
+            &Reporter::new(move |event| {
+                if let Event::BuildFailed(error) = event {
+                    failed.lock().unwrap().push(error.to_string());
+                }
+            }),
             || Err::<(), _>("boom"),
             || swaps += 1,
         );
         assert_eq!(swaps, 0);
+        assert_eq!(*errors.lock().unwrap(), ["boom"]);
     }
 
     #[test]
@@ -321,6 +341,7 @@ mod tests {
                 paths: vec![dir.clone()],
                 ignore: Ignore::new(&dir, &[], vec![], None).unwrap(),
                 debounce: Duration::from_millis(50),
+                reporter: Reporter::default(),
             },
             {
                 let counter = counter.clone();
@@ -361,6 +382,7 @@ mod tests {
                 paths: vec![dir.clone()],
                 ignore: Ignore::new(&dir, &["*.skip".into()], vec![], None).unwrap(),
                 debounce: Duration::from_millis(50),
+                reporter: Reporter::default(),
             },
             || Ok::<_, String>(()),
             move || {

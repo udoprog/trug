@@ -203,16 +203,29 @@ no_redirect = false     # hand backend redirects to the client
 ### Commands
 
 ```shell
-trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/] [-v]
+trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/]
 trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
 trug update
 ```
 
 `trug build` takes the app's cargo flags (`--manifest-path`, `--target`, `-F`,
-`--all-features`, `--no-default-features`, `--locked`, `--offline`); `-v` prints
-each step's time. `--public-url` overrides the `<base data-trug-public-url>` href
+`--all-features`, `--no-default-features`, `--locked`, `--offline`).
+`--public-url` overrides the `<base data-trug-public-url>` href
 and defaults to `/`. `-d`/`--dist DIR` overrides `[build] dist` with a path
 relative to the current directory; it is still replaced only on success.
+
+Every command takes the output flags:
+
+- `--color auto|always|never`: `auto` (the default) colours a terminal unless
+  `NO_COLOR` is set.
+- `-q`/`--quiet`: only warnings and errors; cargo runs with `--quiet`.
+- `-v`/`--verbose`: also the commands trug runs and the tools it uses.
+
+A build prints a line with its time as each step finishes; on a terminal a
+status line shows the running step. It ends with the files written to `dist`
+(sizes plain and gzipped), whether wasm-opt ran and the total time. A failed
+step is named, with the command that failed. From Rust, nothing is printed
+unless `BuildRequest::reporter` (or `CssRequest::reporter`) is set.
 
 `trug update` replaces the running binary with the latest GitHub release of
 `udoprog/trug` for this platform, or says it is already up to date.
