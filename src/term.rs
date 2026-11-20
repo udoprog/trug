@@ -72,7 +72,9 @@ impl Style {
 
 struct Live {
     verb: &'static str,
-    label: &'static str,
+    label: String,
+    /// What to show instead of the elapsed time, such as download progress.
+    detail: Option<String>,
     start: Instant,
 }
 
@@ -157,7 +159,8 @@ impl Term {
                 self.set_live(
                     (!quiet && !child_output && self.options.live).then(|| Live {
                         verb,
-                        label,
+                        label: label.to_owned(),
+                        detail: None,
                         start: Instant::now(),
                     }),
                 );
@@ -180,12 +183,35 @@ impl Term {
             Event::Tool { name, path } if self.options.verbose => {
                 self.status("Using", &format!("{name} ({})", path.display()));
             }
+            Event::Downloading { name, version } if !quiet && self.options.live => {
+                self.set_live(Some(Live {
+                    verb: "Downloading",
+                    label: format!("{name} {version}"),
+                    detail: None,
+                    start: Instant::now(),
+                }));
+            }
+            Event::DownloadProgress { done, total, .. } => {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(live) = &mut state.live
+                    && live.verb == "Downloading"
+                {
+                    live.detail = Some(match total {
+                        Some(total) if total > 0 => {
+                            format!("{} / {} ({}%)", size(done), size(total), done * 100 / total)
+                        }
+                        _ => size(done),
+                    });
+                }
+            }
+            Event::DownloadFailed { .. } => self.set_live(None),
             Event::Downloading { name, version } if !quiet => {
                 let line =
                     self.status_line("Downloading", Style::Cyan, &format!("{name} {version}"));
                 self.write(&line);
             }
             Event::Downloaded { name, version } => {
+                self.set_live(None);
                 self.status("Downloaded", &format!("{name} {version}"));
             }
             Event::Installing { name, version } => {
@@ -242,11 +268,12 @@ impl Term {
             let Some(live) = &state.live else {
                 return;
             };
-            let text = self.status_line(
-                live.verb,
-                Style::Cyan,
-                &format!("{} {:.1}s", live.label, live.start.elapsed().as_secs_f64()),
-            );
+            let detail = live
+                .detail
+                .clone()
+                .unwrap_or_else(|| format!("{:.1}s", live.start.elapsed().as_secs_f64()));
+            let text =
+                self.status_line(live.verb, Style::Cyan, &format!("{} {detail}", live.label));
             let _ = write!(state.out, "\r\x1b[2K{text}");
             let _ = state.out.flush();
             state.drawn = true;
@@ -506,6 +533,60 @@ mod tests {
             "{text:?}"
         );
         assert!(!text.contains("Building wasm 0."), "{text:?}");
+    }
+
+    fn download(reporter: &Reporter) {
+        let (name, version) = ("wasm-bindgen", "0.2.1");
+        reporter.emit(&Event::Downloading { name, version });
+        reporter.emit(&Event::DownloadProgress {
+            name,
+            done: 1 << 20,
+            total: Some(4 << 20),
+        });
+        std::thread::sleep(Duration::from_millis(250));
+        reporter.emit(&Event::Downloaded { name, version });
+    }
+
+    #[test]
+    fn plain_download_prints_start_and_finish_lines_only() {
+        let (term, buffer) = capture(Options::default());
+        download(&term.reporter());
+        assert_eq!(
+            buffer.text(),
+            " Downloading wasm-bindgen 0.2.1\n  Downloaded wasm-bindgen 0.2.1\n"
+        );
+    }
+
+    #[test]
+    fn live_download_shows_bytes_and_leaves_one_line() {
+        let (term, buffer) = capture(Options {
+            live: true,
+            ..Options::default()
+        });
+        download(&term.reporter());
+        let text = buffer.text();
+        assert!(
+            text.contains("wasm-bindgen 0.2.1 1.00 MiB / 4.00 MiB (25%)"),
+            "{text:?}"
+        );
+        assert!(
+            text.ends_with("\r\x1b[2K  Downloaded wasm-bindgen 0.2.1\n"),
+            "{text:?}"
+        );
+        assert!(
+            !text.contains("Downloading wasm-bindgen 0.2.1\n"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn tool_hits_are_silent_without_verbose() {
+        let (term, buffer) = capture(Options::default());
+        term.reporter().emit(&Event::Tool {
+            name: "wasm-opt",
+            path: Path::new("/bin/wasm-opt"),
+        });
+        assert_eq!(buffer.text(), "");
     }
 
     #[test]

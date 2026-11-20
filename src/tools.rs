@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -85,15 +85,24 @@ fn install_wasm_opt(root: &Path, reporter: &Reporter) -> Result<(), String> {
     let (name, version) = ("wasm-opt", BINARYEN_VERSION);
     reporter.emit(&Event::Downloading { name, version });
     let url = binaryen_url(BINARYEN_VERSION, platform);
-    install(root, &url, &format!("{url}.sha256"), true, |rel| {
-        let name = rel.file_name()?.to_str()?;
-        let wanted = if rel.starts_with("bin") {
-            name == format!("wasm-opt{EXE_SUFFIX}") || name.ends_with(".dll")
-        } else {
-            rel.starts_with("lib") && (name.ends_with(".dylib") || name.contains(".so"))
-        };
-        wanted.then(|| rel.to_owned())
-    })?;
+    let progress = Progress::new(reporter, name);
+    install(
+        root,
+        &url,
+        &format!("{url}.sha256"),
+        true,
+        &progress,
+        |rel| {
+            let name = rel.file_name()?.to_str()?;
+            let wanted = if rel.starts_with("bin") {
+                name == format!("wasm-opt{EXE_SUFFIX}") || name.ends_with(".dll")
+            } else {
+                rel.starts_with("lib") && (name.ends_with(".dylib") || name.contains(".so"))
+            };
+            wanted.then(|| rel.to_owned())
+        },
+    )
+    .inspect_err(|_| reporter.emit(&Event::DownloadFailed { name }))?;
     reporter.emit(&Event::Downloaded { name, version });
     Ok(())
 }
@@ -157,9 +166,16 @@ fn download_bindgen(root: &Path, version: &str, reporter: &Reporter) -> Result<(
     reporter.emit(&Event::Downloading { name, version });
     let url = bindgen_url(version, target);
     let binary = format!("wasm-bindgen{EXE_SUFFIX}");
-    install(root, &url, &format!("{url}.sha256sum"), false, |rel| {
-        (rel == Path::new(&binary)).then(|| Path::new("bin").join(&binary))
-    })?;
+    let progress = Progress::new(reporter, name);
+    install(
+        root,
+        &url,
+        &format!("{url}.sha256sum"),
+        false,
+        &progress,
+        |rel| (rel == Path::new(&binary)).then(|| Path::new("bin").join(&binary)),
+    )
+    .inspect_err(|_| reporter.emit(&Event::DownloadFailed { name }))?;
     reporter.emit(&Event::Downloaded { name, version });
     Ok(())
 }
@@ -221,6 +237,7 @@ fn install(
     url: &str,
     checksum: &str,
     required: bool,
+    progress: &Progress<'_>,
     pick: impl Fn(&Path) -> Option<PathBuf>,
 ) -> Result<(), String> {
     let parent = root.parent().expect("cache roots have a parent");
@@ -231,7 +248,7 @@ fn install(
     let result = (|| {
         let client = client()?;
         let archive = tmp.join("archive.tar.gz");
-        let digest = download(&client, url, &archive)?;
+        let digest = download(&client, url, &archive, progress)?;
         match get(&client, checksum)? {
             Some(response) => {
                 let text = response.text().map_err(|e| format!("{checksum}: {e}"))?;
@@ -283,16 +300,31 @@ pub(crate) fn get(
         .map_err(|e| format!("{url}: {e}"))
 }
 
+/// Reports how far a download has come, at most a few times a second.
+pub(crate) struct Progress<'a> {
+    reporter: &'a Reporter,
+    name: &'a str,
+}
+
+impl<'a> Progress<'a> {
+    pub(crate) fn new(reporter: &'a Reporter, name: &'a str) -> Self {
+        Self { reporter, name }
+    }
+}
+
 /// Streams `url` into `to`; returns its sha256.
 pub(crate) fn download(
     client: &reqwest::blocking::Client,
     url: &str,
     to: &Path,
+    progress: &Progress<'_>,
 ) -> Result<String, String> {
     let mut response = get(client, url)?.ok_or_else(|| format!("{url}: not found"))?;
     let mut file = File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0; 1 << 16];
+    let total = response.content_length();
+    let (mut done, mut last) = (0u64, Instant::now());
     loop {
         let n = response.read(&mut buf).map_err(|e| format!("{url}: {e}"))?;
         if n == 0 {
@@ -301,6 +333,15 @@ pub(crate) fn download(
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n])
             .map_err(|e| format!("{}: {e}", to.display()))?;
+        done += n as u64;
+        if last.elapsed() >= Duration::from_millis(100) {
+            last = Instant::now();
+            progress.reporter.emit(&Event::DownloadProgress {
+                name: progress.name,
+                done,
+                total,
+            });
+        }
     }
     Ok(hex(&hasher.finalize()))
 }

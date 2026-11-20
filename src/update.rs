@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::tools::{client, download, extract, get};
+use crate::report::{Event, Reporter};
+use crate::tools::{Progress, client, download, extract, get};
 
 const LATEST: &str = "https://api.github.com/repos/udoprog/trug/releases/latest";
 
@@ -24,7 +25,7 @@ struct Asset {
 }
 
 /// Updates the running trug to the latest release, unless it is already up to date.
-pub fn update() -> Result<(), String> {
+pub fn update(reporter: &Reporter) -> Result<(), String> {
     let current = env!("CARGO_PKG_VERSION");
     let client = client()?;
     let text = get(&client, LATEST)?
@@ -45,10 +46,20 @@ pub fn update() -> Result<(), String> {
     let work = dir.join(format!(".trug-update{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-    eprintln!("trug: downloading {}", asset.name);
+    let name = asset.name.as_str();
+    reporter.emit(&Event::Downloading {
+        name,
+        version: latest,
+    });
     let result = (|| {
         let archive = work.join(&asset.name);
-        download(&client, &asset.browser_download_url, &archive)?;
+        let progress = Progress::new(reporter, name);
+        download(&client, &asset.browser_download_url, &archive, &progress)
+            .inspect_err(|_| reporter.emit(&Event::DownloadFailed { name }))?;
+        reporter.emit(&Event::Downloaded {
+            name,
+            version: latest,
+        });
         let new = work.join(format!("trug{EXE_SUFFIX}"));
         extract_binary(&archive, &new)?;
         replace(&new, &exe)

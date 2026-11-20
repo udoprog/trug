@@ -266,7 +266,7 @@ fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Err
                 Ok::<_, Box<dyn std::error::Error>>(())
             })?;
         }
-        Command::Update => trug::update::update()?,
+        Command::Update => trug::update::update(&term.reporter())?,
         Command::Packages { cargo } => {
             for package in Query::from(cargo).packages()? {
                 let features = package.features.into_iter().collect::<Vec<_>>();

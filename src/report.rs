@@ -26,8 +26,16 @@ pub enum Event<'a> {
     Tool { name: &'a str, path: &'a Path },
     /// A tool download started.
     Downloading { name: &'a str, version: &'a str },
+    /// Bytes of the download of `name` received so far; `total` when the server says.
+    DownloadProgress {
+        name: &'a str,
+        done: u64,
+        total: Option<u64>,
+    },
     /// A tool download finished.
     Downloaded { name: &'a str, version: &'a str },
+    /// A tool download failed; the error follows as a warning or the result.
+    DownloadFailed { name: &'a str },
     /// A tool is being built with `cargo install`, whose output goes to the terminal.
     Installing { name: &'a str, version: &'a str },
     /// A warning: Sass `@warn` and deprecations, a missing tool, a watch error.
