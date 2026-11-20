@@ -231,7 +231,9 @@ impl Term {
                 let line = format!("{} {text}", self.paint(Style::Cyan, "debug:"));
                 self.write(&line);
             }
-            Event::BuildFailed(error) => self.error(error),
+            Event::BuildFailed(error) => self.build_failed(error),
+            Event::Changed(paths) => self.changed(paths),
+            Event::ProxyError(error) => self.warning(&format!("proxy: {error}")),
             _ => {}
         }
     }
@@ -355,6 +357,56 @@ impl Term {
         };
         let _ = write!(out, "{:>12} {opt}", "wasm-opt");
         out
+    }
+}
+
+/// Files changed under watch are named, up to this many.
+const CHANGED_SHOWN: usize = 3;
+
+/// What `trug serve` shows around builds.
+impl Term {
+    /// The lines `trug serve` starts with: where it listens, what it proxies (mount and
+    /// backend) and the paths it watches.
+    pub fn banner(&self, urls: &[String], proxies: &[(String, String)], watching: &[String]) {
+        for url in urls {
+            self.status("Serving", url);
+        }
+        for (mount, backend) in proxies {
+            self.status("Proxying", &format!("{mount} -> {backend}"));
+        }
+        for (i, path) in watching.iter().enumerate() {
+            self.status(if i == 0 { "Watching" } else { "" }, path);
+        }
+    }
+
+    fn changed(&self, paths: &[std::path::PathBuf]) {
+        let mut text = paths
+            .iter()
+            .take(CHANGED_SHOWN)
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if paths.len() > CHANGED_SHOWN {
+            let _ = write!(text, " and {} more", paths.len() - CHANGED_SHOWN);
+        }
+        if text.is_empty() {
+            text.push_str("after a change");
+        }
+        self.status("Rebuilding", &text);
+    }
+
+    /// After a good rebuild: how many connected pages were told to reload.
+    pub fn reloaded(&self, pages: usize) {
+        let plural = if pages == 1 { "" } else { "s" };
+        self.status("Reloaded", &format!("{pages} page{plural}"));
+    }
+
+    fn build_failed(&self, error: &str) {
+        self.error(error);
+        if !self.options.quiet {
+            let line = self.status_line("Serving", Style::Yellow, "the last good build");
+            self.write(&line);
+        }
     }
 }
 
@@ -601,6 +653,45 @@ mod tests {
             buffer.text(),
             "\x1b[1;32m    Finished\x1b[0m x\n\x1b[1;33mwarning:\x1b[0m w\n"
         );
+    }
+
+    #[test]
+    fn serve_banner_rebuild_reload_and_failure_are_plain_lines() {
+        let (term, buffer) = capture(Options::default());
+        term.banner(
+            &["http://127.0.0.1:8080".into()],
+            &[("/api".into(), "http://localhost:3000/api".into())],
+            &[".".into(), "/src/sockel/style".into()],
+        );
+        let reporter = term.reporter();
+        let paths: Vec<std::path::PathBuf> = ["a.scss", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(Into::into)
+            .into();
+        reporter.emit(&Event::Changed(&paths[..2]));
+        term.reloaded(1);
+        reporter.emit(&Event::Changed(&paths));
+        reporter.emit(&Event::BuildFailed("styles: boom"));
+        term.reloaded(0);
+        assert_eq!(
+            buffer.text(),
+            "     Serving http://127.0.0.1:8080\n\
+             \x20   Proxying /api -> http://localhost:3000/api\n\
+             \x20   Watching .\n\
+             \x20            /src/sockel/style\n\
+             \x20 Rebuilding a.scss, b.rs\n\
+             \x20   Reloaded 1 page\n\
+             \x20 Rebuilding a.scss, b.rs, c.rs and 2 more\n\
+             error: styles: boom\n\
+             \x20    Serving the last good build\n\
+             \x20   Reloaded 0 pages\n"
+        );
+        let (term, buffer) = capture(Options {
+            quiet: true,
+            ..Options::default()
+        });
+        term.reporter().emit(&Event::BuildFailed("boom"));
+        term.reloaded(1);
+        assert_eq!(buffer.text(), "error: boom\n");
     }
 
     #[test]

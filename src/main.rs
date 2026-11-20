@@ -245,20 +245,39 @@ fn run(command: Command, term: &Arc<Term>) -> Result<(), Box<dyn std::error::Err
             let port = port.or(serve.port).unwrap_or(8080);
             let mut site = trug::serve::Site::new(dist, &serve.headers)?
                 .with_proxies(&proxies)?
-                .with_public_url(&report.public_url);
+                .with_public_url(&report.public_url)
+                .with_reporter(term.reporter());
             if !no_watch {
                 site = site.with_reload();
             }
-            let _watcher = if no_watch {
+            let proxied = proxies
+                .iter()
+                .map(|p| {
+                    let mount = trug::proxy::Proxy::new(p)?.mount().to_owned();
+                    Ok((mount, p.backend.clone()))
+                })
+                .collect::<Result<Vec<_>, trug::proxy::Error>>()?;
+            let root = request.root.clone();
+            let watcher = if no_watch {
                 None
             } else {
                 Some(start_watch(request, ignore, site.clone(), term.clone())?)
             };
+            let mut watching = watcher.as_ref().map_or_else(Vec::new, |(_, paths)| {
+                paths
+                    .iter()
+                    .map(|p| shown_path(&root, p))
+                    .collect::<Vec<_>>()
+            });
+            // The app's own paths first, then the crates' style dirs.
+            watching.sort_by_key(|p| std::path::Path::new(p).is_absolute());
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listeners = trug::serve::bind(&addresses, port).await?;
-                for listener in &listeners {
-                    term.status("Serving", &format!("http://{}", listener.local_addr()?));
-                }
+                let urls = listeners
+                    .iter()
+                    .map(|l| Ok(format!("http://{}{}", l.local_addr()?, report.public_url)))
+                    .collect::<std::io::Result<Vec<_>>>()?;
+                term.banner(&urls, &proxied, &watching);
                 tokio::select! {
                     result = site.serve(listeners) => result?,
                     _ = tokio::signal::ctrl_c() => {}
@@ -303,12 +322,22 @@ fn load_config(
     Ok((config, root))
 }
 
+/// `path` relative to `root` when below it, `.` for the root itself.
+fn shown_path(root: &std::path::Path, path: &std::path::Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => ".".to_owned(),
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// Starts rebuilding on changes; returns the watcher and the paths it watches.
 fn start_watch(
     request: trug::build::BuildRequest,
     ignore: Vec<String>,
     site: trug::serve::Site,
     term: Arc<Term>,
-) -> Result<trug::watch::Watcher, Box<dyn std::error::Error>> {
+) -> Result<(trug::watch::Watcher, Vec<PathBuf>), Box<dyn std::error::Error>> {
     let root = request.root.clone();
     let mut settings = request.config.watch.clone();
     settings.ignore.extend(ignore);
@@ -338,20 +367,31 @@ fn start_watch(
     );
     let watcher = trug::watch::Watcher::start(
         trug::watch::WatchRequest {
-            paths: watch,
+            paths: watch.clone(),
             ignore,
             debounce,
             reporter: term.reporter(),
         },
-        move || {
-            term.status("Rebuilding", "after a change");
-            let start = Instant::now();
-            trug::build::build(&request)
-                .map(|report| term.finished(&report, request.release, start.elapsed(), false))
+        {
+            let term = term.clone();
+            let site = site.clone();
+            move || {
+                let start = Instant::now();
+                match trug::build::build(&request) {
+                    Ok(report) => {
+                        term.finished(&report, request.release, start.elapsed(), false);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        site.notify_error(&error.to_string());
+                        Err(error)
+                    }
+                }
+            }
         },
-        move || site.notify_reload(),
+        move || term.reloaded(site.notify_reload()),
     )?;
-    Ok(watcher)
+    Ok((watcher, watch))
 }
 
 #[cfg(test)]

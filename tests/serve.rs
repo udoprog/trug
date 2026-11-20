@@ -392,3 +392,56 @@ fn serves_dist_under_the_public_url() {
     assert!(request(addr, "GET", "/app/sub/").ends_with("<p>sub</p>"));
     assert!(request(addr, "GET", "/app.js").ends_with("let a;"));
 }
+
+#[test]
+fn build_errors_reach_connected_and_new_pages_until_a_reload() {
+    let dir = dist("overlay");
+    let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+    let site = Site::new(dir, &BTreeMap::new()).unwrap().with_reload();
+    let listeners = rt.block_on(bind(&["127.0.0.1".to_string()], 0)).unwrap();
+    let addr = listeners[0].local_addr().unwrap();
+    let serving = site.clone();
+    rt.spawn(async move { serving.serve(listeners).await });
+    assert!(request(addr, "GET", "/").contains("build-error"));
+
+    let events = |until: &str| {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(stream, "GET /_trug/reload HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+            .unwrap();
+        let mut seen = String::new();
+        let mut buf = [0u8; 1024];
+        let mut read = move |seen: &mut String| {
+            if let Ok(n) = stream.read(&mut buf) {
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        };
+        while !seen.contains(until) {
+            read(&mut seen);
+        }
+        (seen, read)
+    };
+
+    let (mut seen, mut read) = events(": connected");
+    assert_eq!(site.notify_error("styles failed\nmain.scss:3"), 1);
+    while !seen.contains("data: main.scss:3\n\n") {
+        read(&mut seen);
+    }
+    assert!(
+        seen.contains("event: build-error\ndata: styles failed\ndata: main.scss:3\n\n"),
+        "{seen}"
+    );
+
+    let (late, _late) = events("data: main.scss:3\n\n");
+    assert!(late.contains("event: build-error"), "{late}");
+
+    assert_eq!(site.notify_reload(), 2);
+    while !seen.contains("data: reload") {
+        read(&mut seen);
+    }
+    let (fresh, mut read) = events(": connected");
+    let mut fresh = fresh;
+    read(&mut fresh);
+    assert!(!fresh.contains("build-error"), "{fresh}");
+}

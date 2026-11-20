@@ -1,7 +1,7 @@
 //! Watches source files and rebuilds, one build at a time.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -83,6 +83,11 @@ impl Ignore {
         })
     }
 
+    /// `path` relative to the root when below it.
+    fn relative(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.root).unwrap_or(path).to_owned()
+    }
+
     fn matches_staging(&self, path: &Path) -> bool {
         let Some(prefix) = &self.staging_prefix else {
             return false;
@@ -136,25 +141,26 @@ fn hash_file(path: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
-/// Runs `build` after changes: waits for `debounce` of quiet, builds, and
-/// when changes arrived during the build builds once more. `on_built` fires
-/// after each build that returns `Ok`; a failed build goes to `reporter`. Returns when `changes`
-/// is closed.
+/// Runs `build` after changes: waits for `debounce` of quiet, reports the changed paths, builds,
+/// and when changes arrived during the build builds once more. `on_built` fires after each build
+/// that returns `Ok`; a failed build goes to `reporter`. Returns when `changes` is closed.
 pub fn rebuild_loop<E: fmt::Display>(
-    changes: Receiver<()>,
+    changes: Receiver<Vec<PathBuf>>,
     debounce: Duration,
     reporter: &Reporter,
     mut build: impl FnMut() -> Result<(), E>,
     mut on_built: impl FnMut(),
 ) {
-    while changes.recv().is_ok() {
+    while let Ok(first) = changes.recv() {
+        let mut changed: BTreeSet<PathBuf> = first.into_iter().collect();
         loop {
             match changes.recv_timeout(debounce) {
-                Ok(()) => continue,
+                Ok(paths) => changed.extend(paths),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
+        reporter.emit(&Event::Changed(&changed.into_iter().collect::<Vec<_>>()));
         match build() {
             Ok(()) => on_built(),
             Err(error) => reporter.emit(&Event::BuildFailed(&error.to_string())),
@@ -182,7 +188,7 @@ impl Watcher {
         build: impl FnMut() -> Result<(), E> + Send + 'static,
         on_built: impl FnMut() + Send + 'static,
     ) -> Result<Self, Error> {
-        let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+        let (tx, rx): (Sender<Vec<PathBuf>>, Receiver<Vec<PathBuf>>) = mpsc::channel();
         let ignore = request.ignore;
         let reporter = request.reporter;
         let watch_reporter = reporter.clone();
@@ -193,17 +199,18 @@ impl Watcher {
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
                 Ok(event) => {
+                    if event.kind.is_access() {
+                        return;
+                    }
                     // Every path is checked, so each content is recorded.
-                    let changed = !event.kind.is_access()
-                        && event
-                            .paths
-                            .iter()
-                            .filter(|path| !ignore.is_ignored(path))
-                            .map(|path| contents.changed(path))
-                            .collect::<Vec<_>>()
-                            .contains(&true);
-                    if changed {
-                        let _ = tx.send(());
+                    let changed: Vec<_> = event
+                        .paths
+                        .iter()
+                        .filter(|path| !ignore.is_ignored(path) && contents.changed(path))
+                        .map(|path| ignore.relative(path))
+                        .collect();
+                    if !changed.is_empty() {
+                        let _ = tx.send(changed);
                     }
                 }
                 Err(error) => {
@@ -288,11 +295,11 @@ mod tests {
             })
         };
         for _ in 0..20 {
-            tx.send(()).unwrap();
+            tx.send(vec![PathBuf::from("a")]).unwrap();
         }
         started_rx.recv().unwrap();
         for _ in 0..20 {
-            tx.send(()).unwrap();
+            tx.send(vec![PathBuf::from("b")]).unwrap();
         }
         go_tx.send(()).unwrap();
         started_rx.recv().unwrap();
@@ -304,9 +311,36 @@ mod tests {
     }
 
     #[test]
+    fn changed_paths_are_merged_and_reported_before_the_build() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(vec![PathBuf::from("b.scss"), PathBuf::from("a.rs")])
+            .unwrap();
+        tx.send(vec![PathBuf::from("a.rs")]).unwrap();
+        drop(tx);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let events = seen.clone();
+        let built = seen.clone();
+        rebuild_loop(
+            rx,
+            Duration::from_millis(1),
+            &Reporter::new(move |event| {
+                if let Event::Changed(paths) = event {
+                    events.lock().unwrap().push(format!("{paths:?}"));
+                }
+            }),
+            move || {
+                built.lock().unwrap().push("build".into());
+                Ok::<_, String>(())
+            },
+            || {},
+        );
+        assert_eq!(*seen.lock().unwrap(), [r#"["a.rs", "b.scss"]"#, "build"]);
+    }
+
+    #[test]
     fn failed_build_does_not_fire_the_hook() {
         let (tx, rx) = mpsc::channel();
-        tx.send(()).unwrap();
+        tx.send(vec![]).unwrap();
         drop(tx);
         let mut swaps = 0;
         let errors = Arc::new(Mutex::new(Vec::new()));

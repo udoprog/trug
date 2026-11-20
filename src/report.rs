@@ -2,7 +2,7 @@
 //! the caller gives it a callback.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,10 @@ pub enum Event<'a> {
     Debug(&'a str),
     /// A rebuild under watch failed with this error.
     BuildFailed(&'a str),
+    /// Files changed under watch, relative to the watch root when below it; a rebuild follows.
+    Changed(&'a [PathBuf]),
+    /// A proxied request failed and got a 502.
+    ProxyError(&'a str),
 }
 
 type Callback = dyn Fn(&Event<'_>) + Send + Sync;

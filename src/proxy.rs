@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite as ts;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::config;
+use crate::report::{Event, Reporter};
 
 const HOP_BY_HOP: [&str; 8] = [
     "connection",
@@ -118,11 +119,17 @@ impl Proxy {
         ))
     }
 
+    /// The path prefix it serves.
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+
     pub fn matches(&self, path: &str) -> bool {
         self.target(path, None).is_some()
     }
 
-    pub async fn forward(&self, request: Request) -> Response {
+    /// Forwards `request`; a failure goes to `reporter` and the client gets a 502.
+    pub async fn forward(&self, request: Request, reporter: &Reporter) -> Response {
         let result = if self.ws {
             self.try_upgrade(request).await
         } else {
@@ -131,7 +138,7 @@ impl Proxy {
         match result {
             Ok(response) => response,
             Err(error) => {
-                eprintln!("trug: proxy error: {error}");
+                reporter.emit(&Event::ProxyError(&error.to_string()));
                 let mut response = Response::new(Body::from("bad gateway"));
                 *response.status_mut() = StatusCode::BAD_GATEWAY;
                 response

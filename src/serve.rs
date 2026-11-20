@@ -19,12 +19,33 @@ use tokio::sync::broadcast;
 
 use crate::config;
 use crate::proxy::Proxy;
+use crate::report::Reporter;
 
 /// Reserved by trug; handled before proxies and files.
 pub const RELOAD_PATH: &str = "/_trug/reload";
 
-const RELOAD_SCRIPT: &str =
-    "<script>new EventSource(\"/_trug/reload\").onmessage=()=>location.reload();</script>";
+/// Reloads on `reload`; on `build-error` shows the error over the page until the next reload
+/// or a click.
+const RELOAD_SCRIPT: &str = concat!(
+    "<script>(()=>{const s=new EventSource(\"/_trug/reload\");",
+    "s.onmessage=()=>location.reload();",
+    "s.addEventListener(\"build-error\",e=>{",
+    "let o=document.getElementById(\"trug-error\");",
+    "if(!o){o=document.createElement(\"pre\");o.id=\"trug-error\";",
+    "o.style.cssText=\"position:fixed;inset:0;z-index:2147483647;margin:0;padding:2em;",
+    "overflow:auto;background:rgba(24,0,0,.92);color:#fdd;font:13px/1.5 monospace;",
+    "white-space:pre-wrap;cursor:pointer\";",
+    "o.title=\"Click to dismiss\";o.onclick=()=>o.remove();document.body.append(o)}",
+    "o.textContent=\"trug: build failed; serving the last good build\\n\\n\"+e.data})})()",
+    "</script>"
+);
+
+/// What the reload stream sends.
+#[derive(Clone, Debug)]
+enum Message {
+    Reload,
+    Error(Arc<str>),
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,8 +81,11 @@ struct Inner {
     dist: RwLock<PathBuf>,
     headers: HeaderMap,
     proxies: Vec<Proxy>,
-    reload: Option<broadcast::Sender<()>>,
+    reload: Option<broadcast::Sender<Message>>,
+    /// The failed build pages are told about when they connect, until the next good one.
+    error: RwLock<Option<Arc<str>>>,
     public_prefix: Option<String>,
+    reporter: Reporter,
 }
 
 impl Site {
@@ -80,7 +104,9 @@ impl Site {
                 headers: map,
                 proxies: Vec::new(),
                 reload: None,
+                error: RwLock::new(None),
                 public_prefix: None,
+                reporter: Reporter::default(),
             }),
         })
     }
@@ -117,11 +143,35 @@ impl Site {
         self
     }
 
-    /// Tells connected pages to reload; call after a successful swap.
-    pub fn notify_reload(&self) {
-        if let Some(tx) = &self.inner.reload {
-            let _ = tx.send(());
-        }
+    /// Where proxy errors go; silent by default. Must be called before the site is cloned.
+    pub fn with_reporter(mut self, reporter: Reporter) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("site not yet shared")
+            .reporter = reporter;
+        self
+    }
+
+    /// Tells connected pages to reload, which clears an error overlay; call after a successful
+    /// swap. Returns how many pages were told.
+    pub fn notify_reload(&self) -> usize {
+        *self.inner.error.write().unwrap() = None;
+        self.send(Message::Reload)
+    }
+
+    /// Shows `error` over connected pages, and pages that connect later, until the next
+    /// [`Site::notify_reload`]. Returns how many pages were told.
+    pub fn notify_error(&self, error: &str) -> usize {
+        let error: Arc<str> = error.into();
+        *self.inner.error.write().unwrap() = Some(error.clone());
+        self.send(Message::Error(error))
+    }
+
+    fn send(&self, message: Message) -> usize {
+        self.inner
+            .reload
+            .as_ref()
+            .and_then(|tx| tx.send(message).ok())
+            .unwrap_or(0)
     }
 
     pub fn set_dist(&self, dist: PathBuf) {
@@ -228,22 +278,41 @@ async fn read_file(path: &Path) -> Option<Vec<u8>> {
     tokio::fs::read(path).await.ok()
 }
 
-fn reload_events(tx: &broadcast::Sender<()>) -> Body {
+fn reload_events(tx: &broadcast::Sender<Message>, error: Option<Arc<str>>) -> Body {
     let rx = tx.subscribe();
-    let first = futures_util::stream::once(async {
-        Ok::<_, std::convert::Infallible>(Bytes::from_static(b": connected\n\n"))
-    });
+    let mut first = String::from(": connected\n\n");
+    if let Some(error) = error {
+        first.push_str(&error_event(&error));
+    }
+    let first =
+        futures_util::stream::once(async { Ok::<_, std::convert::Infallible>(Bytes::from(first)) });
     let events = futures_util::stream::unfold(rx, |mut rx| async move {
         let message = match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
-            Err(_) => &b": keep-alive\n\n"[..],
-            Ok(Ok(())) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                &b"data: reload\n\n"[..]
+            Err(_) => Bytes::from_static(b": keep-alive\n\n"),
+            Ok(Ok(Message::Reload)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                Bytes::from_static(b"data: reload\n\n")
             }
+            Ok(Ok(Message::Error(error))) => Bytes::from(error_event(&error)),
             Ok(Err(broadcast::error::RecvError::Closed)) => return None,
         };
-        Some((Ok(Bytes::from_static(message)), rx))
+        Some((Ok(message), rx))
     });
     Body::from_stream(futures_util::StreamExt::chain(first, events))
+}
+
+/// A `build-error` event, one `data:` line per line of `error`.
+fn error_event(error: &str) -> String {
+    let mut event = String::from("event: build-error\n");
+    for line in error.lines() {
+        event.push_str("data: ");
+        event.push_str(line.trim_end_matches('\r'));
+        event.push('\n');
+    }
+    if error.is_empty() {
+        event.push_str("data: \n");
+    }
+    event.push('\n');
+    event
 }
 
 fn inject_script(html: Vec<u8>) -> Vec<u8> {
@@ -264,7 +333,8 @@ async fn handle(State(site): State<Site>, request: Request) -> Response {
     if path == RELOAD_PATH || path.starts_with("/_trug/") {
         return match (&site.inner.reload, path == RELOAD_PATH) {
             (Some(tx), true) => {
-                let mut response = response(StatusCode::OK, &site, reload_events(tx));
+                let error = site.inner.error.read().unwrap().clone();
+                let mut response = response(StatusCode::OK, &site, reload_events(tx, error));
                 let headers = response.headers_mut();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
                 headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -279,7 +349,7 @@ async fn handle(State(site): State<Site>, request: Request) -> Response {
         .iter()
         .find(|p| p.matches(request.uri().path()))
     {
-        return proxy.forward(request).await;
+        return proxy.forward(request, &site.inner.reporter).await;
     }
     let head = match *request.method() {
         Method::GET => false,
@@ -341,6 +411,15 @@ mod tests {
         assert_eq!(relative("/../x"), None);
         assert_eq!(relative("/%2e%2e/x"), None);
         assert_eq!(relative("/a%2Fb"), Some(PathBuf::from("a/b")));
+    }
+
+    #[test]
+    fn error_events_carry_each_line() {
+        assert_eq!(
+            error_event("a\r\n  b"),
+            "event: build-error\ndata: a\ndata:   b\n\n"
+        );
+        assert_eq!(error_event(""), "event: build-error\ndata: \n\n");
     }
 
     #[test]
