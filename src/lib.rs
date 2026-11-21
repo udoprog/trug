@@ -7,6 +7,8 @@
 //! Sass and writes a ready-to-serve `dist` with content-hashed files. `trug
 //! serve` does the same, then rebuilds and reloads the page as you edit.
 //!
+//! Homepage and installer: <https://udoprog.github.io/trug/>.
+//!
 //! If you have used [trunk](https://trunkrs.dev), trug will feel familiar:
 //! moving over is three renames. What trug adds:
 //!

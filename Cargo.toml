@@ -6,6 +6,7 @@ edition = "2024"
 description = "A trunk replacement for component bundling."
 documentation = "https://docs.rs/trug"
 readme = "README.md"
+homepage = "https://udoprog.github.io/trug/"
 repository = "https://github.com/udoprog/trug"
 license = "MIT OR Apache-2.0"
 keywords = ["build", "sass", "trunk", "wasm"]
