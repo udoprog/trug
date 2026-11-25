@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trug manual</title>
+<meta name="description" content="The trug manual: commands, Trug.toml, index.html directives, Sass from crates, build tools and the dev server.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="page">
+<main class="main">
+  <p><a class="link" href="index.html">&larr; trug</a></p>
+  <h1 class="title">Manual</h1>
+  <p class="lead">How to build and serve a Rust frontend app with trug, and every option it takes.</p>
+
+  <nav class="toc" aria-label="Contents">
+    <ol>
+      <li><a class="link" href="#getting-started">Getting started</a></li>
+      <li><a class="link" href="#commands">Commands</a></li>
+      <li><a class="link" href="#trug-toml">Trug.toml</a></li>
+      <li><a class="link" href="#directives">index.html directives</a></li>
+      <li><a class="link" href="#sass">Sass from crates</a></li>
+      <li><a class="link" href="#tools">Build tools</a></li>
+      <li><a class="link" href="#serve">Dist, serving and live reload</a></li>
+      <li><a class="link" href="#proxies">Proxies</a></li>
+      <li><a class="link" href="#trunk">Moving from trunk</a></li>
+    </ol>
+  </nav>
+
+  <h2 class="heading" id="getting-started">1. Getting started</h2>
+  <p>Install the prebuilt binary (Linux x86_64, macOS aarch64) into <code>~/.local/bin</code>; <code>TRUG_INSTALL_DIR</code> changes the directory and <code>TRUG_VERSION</code> pins a release:</p>
+  <pre class="cmd block">curl -fsSL https://udoprog.github.io/trug/install.sh | sh</pre>
+  <p>On Windows, download the zip from the <a class="link" href="https://github.com/udoprog/trug/releases">releases</a>. Builds target <code>wasm32-unknown-unknown</code>, so add it once with <code>rustup target add wasm32-unknown-unknown</code>.</p>
+  <p>A minimal app is a crate with an <code>index.html</code> beside its <code>Cargo.toml</code>:</p>
+  <pre class="cmd block">my-app/
+  Cargo.toml
+  index.html
+  src/lib.rs        # or src/main.rs
+  style/app.scss</pre>
+  <pre class="cmd block">&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;link data-trug rel="rust" href="Cargo.toml"&gt;
+  &lt;link data-trug rel="scss" href="style/app.scss"&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;/body&gt;
+&lt;/html&gt;</pre>
+  <p>Then, in <code>my-app</code>:</p>
+  <pre class="cmd block">trug serve            # build, serve on 127.0.0.1:8080, rebuild on change
+trug build --release  # optimized build into dist</pre>
+  <p>No <code>Trug.toml</code> is needed: without one trug builds <code>index.html</code> in the current directory into <code>dist</code> beside it. The crate is a <code>cdylib</code> library or a binary; a <code>cdylib</code> wins when both exist.</p>
+
+  <h2 class="heading" id="commands">2. Commands</h2>
+  <pre class="cmd block">trug build [-c Trug.toml] [-d DIR] [--release] [-j N] [--public-url /app/]
+trug serve [--no-watch] [--ignore GLOB]... [--address ADDR]... [--port N] [build flags]
+trug clean [-c Trug.toml] [-d DIR] [--cargo [--manifest-path Cargo.toml]] [--tools]
+trug css STYLESHEET [-o OUT] [-I DIR]... [--style expanded|compressed] [--embed-source-map]
+trug packages
+trug update</pre>
+
+  <h3 class="subheading">trug build</h3>
+  <p>Runs the hooks, builds the crate, runs wasm-bindgen (and wasm-opt on <code>--release</code>), compiles the styles, rewrites <code>index.html</code> and replaces <code>dist</code>, only if every step succeeded.</p>
+  <table class="table">
+    <tr><th class="table-cell">Flag</th><th class="table-cell">Meaning</th></tr>
+    <tr><td class="table-cell"><code>-c</code>, <code>--config FILE</code></td><td class="table-cell">The Trug.toml to use; <code>Trug.toml</code> in the current directory by default, and the defaults without one.</td></tr>
+    <tr><td class="table-cell"><code>-d</code>, <code>--dist DIR</code></td><td class="table-cell">Output directory, relative to the current directory; overrides <code>[build] dist</code>.</td></tr>
+    <tr><td class="table-cell"><code>--release</code></td><td class="table-cell">Cargo release profile, wasm-opt, no source maps.</td></tr>
+    <tr><td class="table-cell"><code>-j</code>, <code>--jobs N</code></td><td class="table-cell">Passed to cargo as <code>--jobs</code>.</td></tr>
+    <tr><td class="table-cell"><code>--public-url URL</code></td><td class="table-cell">Prefix of every URL in the output <code>index.html</code>; overrides <code>&lt;base data-trug-public-url&gt;</code>, default <code>/</code>.</td></tr>
+  </table>
+
+  <h3 class="subheading">Cargo flags</h3>
+  <p><code>build</code>, <code>serve</code>, <code>css</code> and <code>packages</code> take the app's cargo flags, so features resolve as in the build:</p>
+  <table class="table">
+    <tr><td class="table-cell"><code>--manifest-path FILE</code></td><td class="table-cell">The app's Cargo.toml.</td></tr>
+    <tr><td class="table-cell"><code>--target TRIPLE</code></td><td class="table-cell">Default <code>wasm32-unknown-unknown</code>.</td></tr>
+    <tr><td class="table-cell"><code>-F</code>, <code>--features A,B</code></td><td class="table-cell">Features to enable; repeatable or comma-separated.</td></tr>
+    <tr><td class="table-cell"><code>--all-features</code>, <code>--no-default-features</code></td><td class="table-cell">As in cargo.</td></tr>
+    <tr><td class="table-cell"><code>--locked</code>, <code>--offline</code></td><td class="table-cell">As in cargo.</td></tr>
+  </table>
+
+  <h3 class="subheading">trug serve</h3>
+  <p>Takes every <code>build</code> flag and cargo flag, plus:</p>
+  <table class="table">
+    <tr><td class="table-cell"><code>--no-watch</code></td><td class="table-cell">Serve the first build only: no watching, no reload script.</td></tr>
+    <tr><td class="table-cell"><code>--ignore GLOB</code></td><td class="table-cell">Repeatable; adds to <code>[watch] ignore</code> for this run, relative to Trug.toml.</td></tr>
+    <tr><td class="table-cell"><code>--address ADDR</code></td><td class="table-cell">Repeatable; overrides <code>[serve] addresses</code>.</td></tr>
+    <tr><td class="table-cell"><code>--port N</code></td><td class="table-cell">Overrides <code>[serve] port</code>; 8080 by default.</td></tr>
+  </table>
+
+  <h3 class="subheading">trug clean</h3>
+  <p>Removes <code>dist</code> (found as <code>build</code> finds it, with <code>-c</code> and <code>-d</code>) and the staging directories beside it; a missing <code>dist</code> is not an error. <code>--cargo</code> also runs <code>cargo clean</code> (with <code>--manifest-path</code> for the app's Cargo.toml) and <code>--tools</code> also removes the <a class="link" href="#tools">tool cache</a>. Nothing else is removed.</p>
+
+  <h3 class="subheading">trug css and trug packages</h3>
+  <p><code>trug css</code> builds just a stylesheet with <a class="link" href="#sass"><code>pkg:</code> URLs</a>: <code>-o</code> writes it atomically (stdout without it), <code>-I</code>/<code>--load-path</code> adds directories plain <code>@use</code> URLs resolve against, <code>--style</code> is <code>expanded</code> (default) or <code>compressed</code>, and <code>--embed-source-map</code> appends an inline source map with the sources in it. <code>trug packages</code> lists the crates that ship styles, with their enabled features.</p>
+  <pre class="cmd block">trug css style/app.scss -o dist/app.css -F extra --style compressed</pre>
+
+  <h3 class="subheading">trug update</h3>
+  <p>Replaces the running binary with the latest GitHub release for this platform, or says it is up to date.</p>
+
+  <h3 class="subheading">Output flags</h3>
+  <p>Every command takes <code>--color auto|always|never</code> (<code>auto</code> colours a terminal unless <code>NO_COLOR</code> is set), <code>-q</code>/<code>--quiet</code> (only warnings and errors; cargo runs quiet) and <code>-v</code>/<code>--verbose</code> (also the commands trug runs and the tools it uses).</p>
+
+  <h2 class="heading" id="trug-toml">3. Trug.toml</h2>
+  <p>Every key is optional, unknown keys are errors, and paths are relative to the Trug.toml.</p>
+  <pre class="cmd block">[build]
+target = "index.html"   # default
+dist = "dist"           # default: beside target
+wasm_opt = true         # default; false skips wasm-opt on --release builds
+
+[[hooks]]               # repeatable; run in order before the build
+stage = "pre_build"     # the only stage
+command = "cargo"
+command_arguments = ["run", "-p", "tools"]
+
+[serve]
+addresses = ["127.0.0.1"]   # default
+port = 8080                 # default
+headers = { "Cross-Origin-Opener-Policy" = "same-origin" }  # added to every response
+
+[watch]
+watch = ["."]           # default: the directory of Trug.toml
+ignore = ["target"]     # globs whose changes are ignored
+debounce_ms = 200       # default
+
+[[proxy]]               # repeatable, see Proxies
+backend = "http://127.0.0.1:3000/api"
+rewrite = "/api"
+no_redirect = false
+ws = false
+change_origin = false</pre>
+  <p>Hooks run in the Trug.toml's directory with stdin closed and <code>TRUG_STAGING_DIR</code> set to the staging directory the build writes to. A failing hook fails the build.</p>
+
+  <h2 class="heading" id="directives">4. index.html directives</h2>
+  <p>trug reads <code>&lt;link data-trug rel="..."&gt;</code> elements, replaces them with what they produce and removes them from the output. <code>href</code> is relative to <code>index.html</code>.</p>
+  <table class="table">
+    <tr><th class="table-cell"><code>rel</code></th><th class="table-cell">Does</th></tr>
+    <tr><td class="table-cell"><code>rust</code></td><td class="table-cell">The crate to build, at most one. <code>href</code> is the crate directory or Cargo.toml, default <code>Cargo.toml</code>.</td></tr>
+    <tr><td class="table-cell"><code>scss</code></td><td class="table-cell">Compiles Sass with <code>pkg:</code> URLs; a source map with the sources in dev builds, none with <code>--release</code>.</td></tr>
+    <tr><td class="table-cell"><code>css</code></td><td class="table-cell">Copies a plain stylesheet.</td></tr>
+    <tr><td class="table-cell"><code>copy-dir</code></td><td class="table-cell">Copies a directory into <code>dist</code>, at <code>data-target-path</code> (a relative path inside <code>dist</code>) or the directory's own name.</td></tr>
+    <tr><td class="table-cell"><code>icon</code></td><td class="table-cell">Copies the icon and links it.</td></tr>
+  </table>
+  <p>Any other <code>rel</code> is an error. Styles and icons get content-hashed names, as do the app's <code>&lt;name&gt;_bg-&lt;hash&gt;.wasm</code> and <code>&lt;name&gt;-&lt;hash&gt;.js</code> (<code>&lt;hash&gt;</code> is 16 hex digits of the sha256).</p>
+  <p><code>&lt;base data-trug-public-url href="/app/"&gt;</code> sets the URL prefix the output uses; <code>--public-url</code> overrides it.</p>
+
+  <h2 class="heading" id="sass">5. Sass from crates</h2>
+  <p>A crate ships Sass by opting in, in its Cargo.toml. The style directory must be in the package's <code>include</code> so it is published. Crate names match with <code>-</code> and <code>_</code> alike.</p>
+  <pre class="cmd block">[package.metadata.trug]
+dir = "style"          # default; the style directory
+entry = "_index.scss"  # default; inside dir
+
+[package.metadata.trug.gate]
+buttons = "button"     # _buttons.scss is empty unless feature "button" is on</pre>
+  <ul>
+    <li><code>@use "pkg:&lt;crate&gt;" as x</code> loads the crate's entry. sasso needs an explicit namespace here (<code>as x</code> or <code>as *</code>).</li>
+    <li><code>@use "pkg:&lt;crate&gt;/&lt;path&gt;"</code> loads a stylesheet in the crate's style directory; partials, <code>.scss</code> and index files resolve as in Sass, and the path stays inside the crate.</li>
+    <li><code>@use "pkg:&lt;crate&gt;/features" as f</code> is generated: <code>f.$features</code> (enabled features to <code>true</code>), <code>f.enabled($name)</code>, <code>f.$name</code> and <code>f.$version</code>.</li>
+    <li>Any other URL resolves relative to the containing file, then the <code>-I</code> load paths. Inside a crate, relative imports stay in that crate, and a file reached by two routes loads once.</li>
+  </ul>
+  <pre class="cmd block">@use "pkg:sockel/features" as f;
+@if f.enabled("table") {
+  .table { ... }
+}</pre>
+  <p>A gated file loads as an empty stylesheet when its feature is off, through <code>pkg:</code> and relative loads alike, so it should only emit CSS. An unknown feature or a key that names no file is an error. Features come from <code>cargo metadata</code> run with the app's flags, matching <code>cargo tree -e features</code>.</p>
+
+  <h2 class="heading" id="tools">6. Build tools</h2>
+  <p>trug fetches its tools once into its cache: <code>$TRUG_CACHE_DIR</code>, else <code>$XDG_CACHE_HOME/trug</code>, else <code>~/.cache/trug</code>. Later builds need no network.</p>
+  <ul>
+    <li><strong>wasm-bindgen</strong>, at exactly the version in the app's <code>Cargo.lock</code>: <code>wasm-bindgen</code> on <code>PATH</code> if it is that version, else the cache (<code>wasm-bindgen/&lt;version&gt;/</code>), else the prebuilt release checked against its sha256, else <code>cargo install</code>ed into the cache.</li>
+    <li><strong>wasm-opt</strong>, run as <code>wasm-opt -Oz</code> on <code>--release</code> builds unless <code>[build] wasm_opt = false</code>; dev builds never run it. <code>wasm-opt</code> on <code>PATH</code>, else binaryen at a version pinned in trug (<code>binaryen/&lt;version&gt;/</code>), downloaded and checked against its sha256. Without one trug warns and stages the wasm unoptimized.</li>
+  </ul>
+
+  <h2 class="heading" id="serve">7. Dist, serving and live reload</h2>
+  <p>Every build writes to a staging directory beside <code>dist</code> (a hidden <code>.&lt;dist&gt;.trug-staging-*</code> directory), which replaces <code>dist</code> in one rename only when the build succeeded. A failed build leaves the previous <code>dist</code> as it was; <code>trug clean</code> removes leftover staging directories.</p>
+  <p><code>trug serve</code> builds once, serves <code>dist</code> and rebuilds on change:</p>
+  <ul>
+    <li>It listens on <code>127.0.0.1:8080</code> unless <code>[serve]</code> or the flags say otherwise, and adds <code>[serve] headers</code> to every response.</li>
+    <li>Unknown paths without an extension get <code>index.html</code>, so SPA routes work. With a public URL, files are also served under it.</li>
+    <li>It watches <code>[watch] watch</code> (the Trug.toml directory by default). <code>dist</code>, its staging directories, <code>target</code> and <code>.git</code> are always ignored, as is a write that leaves a file's content unchanged.</li>
+    <li>A change starts one rebuild after <code>debounce_ms</code> of quiet. Builds run one at a time; changes during a build queue one more.</li>
+    <li>Index pages get a script listening on <code>/_trug/reload</code> (server-sent events). The page reloads after each successful build; a failed build keeps the last good page and shows the error in an overlay on it, dismissed with a click.</li>
+  </ul>
+
+  <h2 class="heading" id="proxies">8. Proxies</h2>
+  <p><code>[[proxy]]</code> tables forward requests under a path prefix to a backend, before static files and the SPA fallback:</p>
+  <pre class="cmd block">[[proxy]]
+backend = "http://127.0.0.1:8150/api/"
+no_redirect = true
+
+[[proxy]]
+rewrite = "/ws"
+backend = "ws://127.0.0.1:8160/ws"
+ws = true</pre>
+  <table class="table">
+    <tr><td class="table-cell"><code>backend</code></td><td class="table-cell">The backend URL; its path is the mount prefix unless <code>rewrite</code> is set.</td></tr>
+    <tr><td class="table-cell"><code>rewrite</code></td><td class="table-cell">The prefix trug serves, replaced by the backend's path.</td></tr>
+    <tr><td class="table-cell"><code>no_redirect</code></td><td class="table-cell">Hand backend redirects to the client instead of following them.</td></tr>
+    <tr><td class="table-cell"><code>ws</code></td><td class="table-cell">Proxy WebSockets; <code>backend</code> is a <code>ws://</code> URL (no TLS). Frames are piped both ways; subprotocols are not negotiated.</td></tr>
+    <tr><td class="table-cell"><code>change_origin</code></td><td class="table-cell">Rewrite the request's <code>Origin</code> header to the backend's origin.</td></tr>
+  </table>
+  <p>Request headers (cookies, <code>Origin</code>, ...) go to the backend. A backend that is down gives 502.</p>
+
+  <h2 class="heading" id="trunk">9. Moving from trunk</h2>
+  <p>Three renames; trug does not read the <code>data-trunk</code> forms:</p>
+  <table class="table">
+    <tr><th class="table-cell">trunk</th><th class="table-cell">trug</th></tr>
+    <tr><td class="table-cell"><code>Trunk.toml</code></td><td class="table-cell"><code>Trug.toml</code></td></tr>
+    <tr><td class="table-cell"><code>&lt;link data-trunk rel="..."&gt;</code></td><td class="table-cell"><code>&lt;link data-trug rel="..."&gt;</code></td></tr>
+    <tr><td class="table-cell"><code>&lt;base data-trunk-public-url&gt;</code></td><td class="table-cell"><code>&lt;base data-trug-public-url&gt;</code></td></tr>
+  </table>
+  <p>Only the <code>rel</code> values in <a class="link" href="#directives">directives</a> are supported. The output differs: no SRI <code>integrity</code> attributes, no <code>window.wasmBindings</code>, no <code>TrunkApplicationStarted</code> event, the wasm is <code>&lt;name&gt;_bg-HASH.wasm</code> (trunk: <code>&lt;name&gt;-HASH_bg.wasm</code>), and there is no <code>.trunk-lock</code>.</p>
+
+  <p class="note"><a class="link" href="index.html">trug home</a> &middot; <a class="link" href="https://github.com/udoprog/trug">Repository</a> &middot; <a class="link" href="https://docs.rs/trug">API documentation</a></p>
+</main>
+</body>
+</html>
