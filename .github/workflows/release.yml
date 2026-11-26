@@ -23,7 +23,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
     - name: Check that the version matches Cargo.toml
       run: |
@@ -43,13 +43,13 @@ jobs:
         - {os: macos-latest, method: gzip}
         - {os: ubuntu-latest, method: gzip}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - uses: udoprog/actions@kick
     - run: cargo build --release
     - run: kick ${{matrix.method}} --output dist
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: dist-${{matrix.os}}
         path: dist
@@ -59,12 +59,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/download-artifact@v7
+    - uses: actions/checkout@v7
+    - uses: actions/download-artifact@v8
       with: {name: dist-macos-latest, path: dist}
-    - uses: actions/download-artifact@v7
+    - uses: actions/download-artifact@v8
       with: {name: dist-windows-latest, path: dist}
-    - uses: actions/download-artifact@v7
+    - uses: actions/download-artifact@v8
       with: {name: dist-ubuntu-latest, path: dist}
     - uses: udoprog/actions@kick
     - run: kick gh release --upload "dist/*" --github-action
